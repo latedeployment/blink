@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2023 Trung Nguyen                                                  │
 │                                                                              │
@@ -16,6 +16,8 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
+#include "blink/hostfs.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
@@ -26,8 +28,8 @@
 #include <sys/mman.h>
 #include <sys/types.h>
 
+#include "blink/assert.h"
 #include "blink/errno.h"
-#include "blink/hostfs.h"
 #include "blink/log.h"
 #include "blink/macros.h"
 #include "blink/syscall.h"
@@ -128,6 +130,22 @@ cleananddie:
   return -1;
 }
 
+int HostfsReadmountentry(struct VfsDevice *device, char **spec, char **type,
+                         char **mntops) {
+  struct HostfsDevice *hostfsdevice = (struct HostfsDevice *)device->data;
+  *spec = strdup(hostfsdevice->source);
+  if (*spec == NULL) {
+    return enomem();
+  }
+  *type = strdup("hostfs");
+  if (*type == NULL) {
+    free(*spec);
+    return enomem();
+  }
+  *mntops = NULL;
+  return 0;
+}
+
 int HostfsFreeInfo(void *info) {
   struct HostfsInfo *hostfsinfo = (struct HostfsInfo *)info;
   if (info == NULL) {
@@ -196,11 +214,11 @@ static ssize_t HostfsGetHostPath(struct VfsInfo *info,
     return -1;
   }
   sourcelen = hostfsdevice->sourcelen;
-  if (hostfsdevice->source[sourcelen - 1] == '/') {
+  if (sourcelen && hostfsdevice->source[sourcelen - 1] == '/') {
     --sourcelen;
   }
   pathlen += sourcelen;
-  if (pathlen >= VFS_PATH_MAX) {
+  if (pathlen + 1 >= VFS_PATH_MAX) {
     ret = enametoolong();
   } else {
     memmove(output + sourcelen, output, pathlen - sourcelen);
@@ -865,7 +883,11 @@ int HostfsFdatasync(struct VfsInfo *info) {
     return efault();
   }
   hostinfo = (struct HostfsInfo *)info->data;
+#ifdef HAVE_FDATASYNC
   return fdatasync(hostinfo->filefd);
+#else
+  return fsync(hostinfo->filefd);
+#endif
 }
 
 int HostfsFlock(struct VfsInfo *info, int operation) {
@@ -1710,6 +1732,7 @@ int HostfsTcsetpgrp(struct VfsInfo *info, pid_t pgrp) {
   return tcsetpgrp(hostinfo->filefd, pgrp);
 }
 
+#ifdef HAVE_SOCKATMARK
 int HostfsSockatmark(struct VfsInfo *info) {
   struct HostfsInfo *hostinfo;
   VFS_LOGF("HostfsSockatmark(%p)", info);
@@ -1719,6 +1742,7 @@ int HostfsSockatmark(struct VfsInfo *info) {
   hostinfo = (struct HostfsInfo *)info->data;
   return sockatmark(hostinfo->filefd);
 }
+#endif
 
 int HostfsPipe(struct VfsInfo *infos[2]) {
   int i;
@@ -1839,7 +1863,6 @@ cleananddie:
 }
 
 int HostfsFexecve(struct VfsInfo *info, char *const *argv, char *const *envp) {
-  struct HostfsInfo *hostinfo;
 #ifndef HAVE_FEXECVE
   char path[VFS_PATH_MAX];
 #endif
@@ -1848,6 +1871,7 @@ int HostfsFexecve(struct VfsInfo *info, char *const *argv, char *const *envp) {
   if (info == NULL) {
     return efault();
   }
+  struct HostfsInfo *hostinfo;
   hostinfo = (struct HostfsInfo *)info->data;
   return fexecve(hostinfo->filefd, argv, envp);
 #else
@@ -1913,10 +1937,12 @@ cleananddie:
 }
 
 struct VfsSystem g_hostfs = {.name = "hostfs",
+                             .nodev = true,
                              .ops = {
                                  .Init = HostfsInit,
                                  .Freeinfo = HostfsFreeInfo,
                                  .Freedevice = HostfsFreeDevice,
+                                 .Readmountentry = HostfsReadmountentry,
                                  .Finddir = HostfsFinddir,
                                  .Traverse = HostfsTraverse,
                                  .Readlink = HostfsReadlink,
@@ -1998,7 +2024,9 @@ struct VfsSystem g_hostfs = {.name = "hostfs",
                                  .Tcgetsid = HostfsTcgetsid,
                                  .Tcgetpgrp = HostfsTcgetpgrp,
                                  .Tcsetpgrp = HostfsTcsetpgrp,
+#ifdef HAVE_SOCKATMARK
                                  .Sockatmark = HostfsSockatmark,
+#endif
                                  .Fexecve = HostfsFexecve,
                              }};
 

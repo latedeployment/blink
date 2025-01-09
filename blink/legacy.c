@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2023 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -42,8 +42,22 @@ relegated void OpDecZv(P) {
   }
 }
 
+static relegated void PushaCommon(struct Machine *m, void *b, size_t n) {
+  u32 v;
+  switch (m->mode.omode) {
+    case XED_MODE_REAL:
+      Put16(m->sp, (v = (Get16(m->sp) - n) & 0xffff));
+      break;
+    case XED_MODE_LEGACY:
+      Put64(m->sp, (v = (Get32(m->sp) - n) & 0xffffffff));
+      break;
+    default:
+      __builtin_unreachable();
+  }
+  CopyToUser(m, m->ss.base + v, b, n);
+}
+
 static relegated void Pushaw(P) {
-  u16 v;
   u8 b[8][2];
   memcpy(b[0], m->di, 2);
   memcpy(b[1], m->si, 2);
@@ -53,12 +67,10 @@ static relegated void Pushaw(P) {
   memcpy(b[5], m->dx, 2);
   memcpy(b[6], m->cx, 2);
   memcpy(b[7], m->ax, 2);
-  Put16(m->sp, (v = (Read16(m->sp) - sizeof(b)) & 0xffff));
-  CopyToUser(m, m->ss.base + v, b, sizeof(b));
+  PushaCommon(m, b, sizeof(b));
 }
 
 static relegated void Pushad(P) {
-  u32 v;
   u8 b[8][4];
   memcpy(b[0], m->di, 4);
   memcpy(b[1], m->si, 4);
@@ -68,22 +80,37 @@ static relegated void Pushad(P) {
   memcpy(b[5], m->dx, 4);
   memcpy(b[6], m->cx, 4);
   memcpy(b[7], m->ax, 4);
-  Put64(m->sp, (v = (Get32(m->sp) - sizeof(b)) & 0xffffffff));
-  CopyToUser(m, m->ss.base + v, b, sizeof(b));
+  PushaCommon(m, b, sizeof(b));
+}
+
+static relegated void PopaCommon(struct Machine *m, void *b, size_t n) {
+  u64 addr;
+  switch (m->mode.omode) {
+    case XED_MODE_REAL:
+      addr = m->ss.base + Read16(m->sp);
+      if (CopyFromUser(m, b, addr, n) == -1) {
+        ThrowSegmentationFault(m, addr);
+      }
+      Put16(m->sp, (Get16(m->sp) + n) & 0xffff);
+      break;
+    case XED_MODE_LEGACY:
+      addr = m->ss.base + Read32(m->sp);
+      if (CopyFromUser(m, b, addr, n) == -1) {
+        ThrowSegmentationFault(m, addr);
+      }
+      Put64(m->sp, (Get32(m->sp) + n) & 0xffffffff);
+      break;
+    default:
+      __builtin_unreachable();
+  }
 }
 
 static relegated void Popaw(P) {
-  u64 addr;
   u8 b[8][2];
-  addr = m->ss.base + Read16(m->sp);
-  if (CopyFromUser(m, b, addr, sizeof(b)) == -1) {
-    ThrowSegmentationFault(m, addr);
-  }
-  Put16(m->sp, (Get32(m->sp) + sizeof(b)) & 0xffff);
+  PopaCommon(m, b, sizeof(b));
   memcpy(m->di, b[0], 2);
   memcpy(m->si, b[1], 2);
   memcpy(m->bp, b[2], 2);
-  memcpy(m->sp, b[3], 2);
   memcpy(m->bx, b[4], 2);
   memcpy(m->dx, b[5], 2);
   memcpy(m->cx, b[6], 2);
@@ -91,17 +118,11 @@ static relegated void Popaw(P) {
 }
 
 static relegated void Popad(P) {
-  u64 addr;
   u8 b[8][4];
-  addr = m->ss.base + Get32(m->sp);
-  if (CopyFromUser(m, b, addr, sizeof(b)) == -1) {
-    ThrowSegmentationFault(m, addr);
-  }
-  Put64(m->sp, (Get32(m->sp) + sizeof(b)) & 0xffffffff);
+  PopaCommon(m, b, sizeof(b));
   memcpy(m->di, b[0], 4);
   memcpy(m->si, b[1], 4);
   memcpy(m->bp, b[2], 4);
-  memcpy(m->sp, b[3], 4);
   memcpy(m->bx, b[4], 4);
   memcpy(m->dx, b[5], 4);
   memcpy(m->cx, b[6], 4);
@@ -109,12 +130,14 @@ static relegated void Popad(P) {
 }
 
 relegated void OpPusha(P) {
-  switch (Eamode(rde)) {
+  switch (m->mode.omode) {
     case XED_MODE_REAL:
-      Pushaw(A);
-      break;
     case XED_MODE_LEGACY:
-      Pushad(A);
+      if (Osz(rde)) {
+        Pushaw(A);
+      } else {
+        Pushad(A);
+      }
       break;
     case XED_MODE_LONG:
       OpUdImpl(m);
@@ -124,12 +147,14 @@ relegated void OpPusha(P) {
 }
 
 relegated void OpPopa(P) {
-  switch (Eamode(rde)) {
+  switch (m->mode.omode) {
     case XED_MODE_REAL:
-      Popaw(A);
-      break;
     case XED_MODE_LEGACY:
-      Popad(A);
+      if (Osz(rde)) {
+        Popaw(A);
+      } else {
+        Popad(A);
+      }
       break;
     case XED_MODE_LONG:
       OpUdImpl(m);
@@ -141,20 +166,13 @@ relegated void OpPopa(P) {
 relegated void OpCallf(P) {
   Push(A, m->cs.sel);
   Push(A, m->ip);
-  SetCs(A, uimm0);
-  m->ip = disp & (Osz(rde) ? 0xffff : 0xffffffff);
-  if (m->system->onlongbranch) {
-    m->system->onlongbranch(m);
-  }
+  LongBranch(A, uimm0, disp & (Osz(rde) ? 0xffff : 0xffffffff));
 }
 
 relegated void OpRetf(P) {
-  u64 ip = ip = Pop(A, 0);
-  SetCs(A, Pop(A, uimm0));
-  m->ip = ip;
-  if (m->system->onlongbranch) {
-    m->system->onlongbranch(m);
-  }
+  u64 ip = Pop(A, 0);
+  u16 cs = Pop(A, uimm0);
+  LongBranch(A, cs, ip);
 }
 
 #endif /* DISABLE_METAL */

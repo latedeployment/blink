@@ -1,5 +1,5 @@
 #-*-mode:makefile-gmake;indent-tabs-mode:t;tab-width:8;coding:utf-8-*-┐
-#───vi: set et ft=make ts=8 tw=8 fenc=utf-8 :vi───────────────────────┘
+#── vi: set et ft=make ts=8 tw=8 fenc=utf-8 :vi ──────────────────────┘
 
 TAGS ?= /usr/bin/ctags
 
@@ -13,6 +13,10 @@ CPPFLAGS += -iquote.
 
 ifeq ($(HOST_SYSTEM), Haiku)
 LDLIBS += -lroot -lnetwork -lbsd
+endif
+
+ifeq ($(HOST_OS), Cygwin)
+LDLIBS += -lntdll
 endif
 
 ifeq ($(HOST_SYSTEM), OpenBSD)
@@ -56,12 +60,16 @@ TAGSFLAGS =				\
 # causes an explosive growth in object code size in files like sse.c
 CFLAGS += -U_FORTIFY_SOURCE
 
-ifeq ($(USER), jart)
-CFLAGS := -Wall -Werror $(CFLAGS)
+# ifeq ($(USER), jart)
+# CFLAGS := -Wall -Werror $(CFLAGS)
+# endif
+
+ifeq ($(MODE), zero)
+CFLAGS += -O0 -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer
 endif
 
 ifeq ($(MODE), dbg)
-CFLAGS += -O0 -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer
+CFLAGS += -O0 -g -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer
 CPPFLAGS += -DDEBUG
 endif
 
@@ -151,13 +159,13 @@ endif
 ifeq ($(MODE), llvm)
 CC = clang
 CPPFLAGS += -DDEBUG
-CFLAGS += -Werror -Wno-unused-parameter -Wno-missing-field-initializers
+CFLAGS += -Werror -Wno-unused-parameter -Wno-unused-function -Wno-missing-field-initializers
 LDFLAGS += --rtlib=compiler-rt
 endif
 
 ifeq ($(MODE), llvm++)
 CC = clang++
 CPPFLAGS += -DDEBUG
-CFLAGS += -xc++ -Werror -Wno-unused-parameter -Wno-missing-field-initializers
+CFLAGS += -xc++ -Werror -Wno-unused-function -Wno-unused-parameter -Wno-missing-field-initializers
 LDFLAGS += --rtlib=compiler-rt
 endif

@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -29,7 +29,7 @@ i64 GetPc(struct Machine *m) {
 }
 
 i64 GetIp(struct Machine *m) {
-  return MaskAddress(m->mode, m->ip);
+  return MaskAddress(m->mode.omode, m->ip);
 }
 
 u64 MaskAddress(u32 mode, u64 x) {

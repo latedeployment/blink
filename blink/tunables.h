@@ -4,9 +4,9 @@
 
 #include "blink/builtin.h"
 
-#define BLINK_MAJOR 0
-#define BLINK_MINOR 9
-#define BLINK_PATCH 2
+#define BLINK_MAJOR 1
+#define BLINK_MINOR 1
+#define BLINK_PATCH 0
 
 #define LINUX_MAJOR 4
 #define LINUX_MINOR 5
@@ -17,7 +17,7 @@
 #define LINUX_VERSION       MKVERSION(LINUX_MAJOR, LINUX_MINOR, LINUX_PATCH)
 #define BLINK_VERSION       MKVERSION(BLINK_MAJOR, BLINK_MINOR, BLINK_PATCH)
 
-#if CAN_64BIT && (defined(__APPLE__) || defined(__COSMOPOLITAN__))
+#if CAN_64BIT && defined(__APPLE__)
 #define kSkew 0x088800000000
 #else
 #define kSkew 0x000000000000

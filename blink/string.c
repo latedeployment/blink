@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -16,11 +16,14 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
+#include "blink/string.h"
+
 #include <stdlib.h>
 #include <string.h>
 
 #include "blink/alu.h"
 #include "blink/atomic.h"
+#include "blink/biosrom.h"
 #include "blink/builtin.h"
 #include "blink/bus.h"
 #include "blink/endian.h"
@@ -29,7 +32,6 @@
 #include "blink/macros.h"
 #include "blink/modrm.h"
 #include "blink/rde.h"
-#include "blink/string.h"
 #include "blink/tsan.h"
 #include "blink/util.h"
 #include "blink/x86.h"
@@ -68,40 +70,36 @@ static void WriteInt(u8 p[8], u64 x, unsigned long w) {
   }
 }
 
-static u64 AddDi(P, u64 x) {
-  u64 res;
+static void AddDi(P, u64 x) {
   switch (Eamode(rde)) {
     case XED_MODE_LONG:
-      Put64(m->di, (res = Get64(m->di) + x));
+      Put64(m->di, Get64(m->di) + x);
       break;
     case XED_MODE_LEGACY:
-      Put64(m->di, (res = (Get32(m->di) + x) & 0xffffffff));
+      Put64(m->di, (Get32(m->di) + x) & 0xffffffff);
       break;
     case XED_MODE_REAL:
-      Put16(m->di, (res = Get16(m->di) + x));
+      Put16(m->di, Get16(m->di) + x);
       break;
     default:
       __builtin_unreachable();
   }
-  return res;
 }
 
-static u64 AddSi(P, u64 x) {
-  u64 res;
+static void AddSi(P, u64 x) {
   switch (Eamode(rde)) {
     case XED_MODE_LONG:
-      Put64(m->si, (res = Get64(m->si) + x));
+      Put64(m->si, Get64(m->si) + x);
       break;
     case XED_MODE_LEGACY:
-      Put64(m->si, ((res = Get32(m->si) + x) & 0xffffffff));
+      Put64(m->si, (Get32(m->si) + x) & 0xffffffff);
       break;
     case XED_MODE_REAL:
-      Put16(m->si, (res = Get16(m->si) + x));
+      Put16(m->si, Get16(m->si) + x);
       break;
     default:
       __builtin_unreachable();
   }
-  return res;
 }
 
 static u64 ReadCx(P) {
@@ -207,6 +205,7 @@ static void StringOp(P, int op) {
 static void RepMovsbEnhanced(P) {
   u8 *direal, *sireal;
   u64 diactual, siactual, cx;
+  u16 dilow, silow;
   long diremain, siremain, i, n;
   if ((cx = ReadCx(A))) {
     diactual = AddressDi(A);
@@ -224,26 +223,41 @@ static void RepMovsbEnhanced(P) {
       do {
         direal = ResolveAddress(m, diactual);
         sireal = ResolveAddress(m, siactual);
+        dilow = Get16(m->di);
+        silow = Get16(m->si);
         if (!GetFlag(m->flags, FLAGS_DF)) {
           diremain = 4096 - (diactual & 4095);
+          diremain = MIN(diremain, 65536 - dilow);
           siremain = 4096 - (siactual & 4095);
+          siremain = MIN(siremain, 65536 - silow);
           n = MIN(cx, MIN(diremain, siremain));
-          for (i = 0; i < n; ++i) {
-            direal[i] = sireal[i];
+          if (!IsRomAddress(m, direal)) {
+            for (i = 0; i < n; ++i) {
+              direal[i] = sireal[i];
+            }
           }
-          diactual = AddDi(A, n);
-          siactual = AddSi(A, n);
+          AddDi(A, n);
+          AddSi(A, n);
         } else {
           diremain = (diactual & 4095) + 1;
+          diremain = MIN(diremain, (long)dilow + 1);
           siremain = (siactual & 4095) + 1;
+          siremain = MIN(siremain, (long)silow + 1);
           n = MIN(cx, MIN(diremain, siremain));
-          for (i = 0; i < n; ++i) {
-            direal[-i] = sireal[-i];
+          if (!IsRomAddress(m, direal)) {
+            for (i = 0; i < n; ++i) {
+              direal[-i] = sireal[-i];
+            }
           }
-          diactual = AddDi(A, -n);
-          siactual = AddSi(A, -n);
+          AddDi(A, -n);
+          AddSi(A, -n);
         }
-      } while ((cx = SubtractCx(A, n)));
+        cx = SubtractCx(A, n);
+        if (cx) {
+          diactual = AddressDi(A);
+          siactual = AddressSi(A);
+        }
+      } while (cx);
       atomic_thread_fence(memory_order_release);
       IGNORE_RACES_END();
     }
@@ -253,6 +267,7 @@ static void RepMovsbEnhanced(P) {
 static void RepStosbEnhanced(P) {
   u8 *direal;
   u64 diactual, cx;
+  u16 dilow;
   unsigned diremain, n;
   if ((cx = ReadCx(A))) {
     diactual = AddressDi(A);
@@ -260,11 +275,15 @@ static void RepStosbEnhanced(P) {
     IGNORE_RACES_START();
     do {
       direal = ResolveAddress(m, diactual);
+      dilow = Get16(m->di);
       diremain = 4096 - (diactual & 4095);
+      diremain = MIN(diremain, 65536 - dilow);
       n = MIN(cx, diremain);
-      memset(direal, m->al, n);
-      diactual = AddDi(A, n);
-    } while ((cx = SubtractCx(A, n)));
+      if (!IsRomAddress(m, direal)) memset(direal, m->al, n);
+      AddDi(A, n);
+      cx = SubtractCx(A, n);
+      if (cx) diactual = AddressDi(A);
+    } while (cx);
     atomic_thread_fence(memory_order_release);
     IGNORE_RACES_END();
   }

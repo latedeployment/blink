@@ -1,5 +1,5 @@
 #-*-mode:makefile-gmake;indent-tabs-mode:t;tab-width:8;coding:utf-8-*-┐
-#───vi: set et ft=make ts=8 tw=8 fenc=utf-8 :vi───────────────────────┘
+#── vi: set et ft=make ts=8 tw=8 fenc=utf-8 :vi ──────────────────────┘
 
 emulates = o/$(MODE)/$1.ok $(foreach ARCH,$(ARCHITECTURES),o/$(MODE)/$(ARCH)/$1.emulates)
 
@@ -66,11 +66,6 @@ o/$(MODE)/test/sys:								\
 
 o/$(MODE)/%.runs: o/$(MODE)/%
 	$<
-	@touch $@
-
-o/$(MODE)/%.ok: % o/$(MODE)/blink/blink
-	@mkdir -p $(@D)
-	o/$(MODE)/blink/blink $<
 	@touch $@
 
 o/$(MODE)/i486/%.runs: o/$(MODE)/i486/% o/third_party/qemu/4/qemu-i386 $(VM)

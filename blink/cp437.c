@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -18,6 +18,13 @@
 ╚─────────────────────────────────────────────────────────────────────────────*/
 #include "blink/util.h"
 
+/*
+ * The original hardware displayed 0x00, 0x20, and 0xff as space. It
+ * made sense for viewing sparse binary data that 0x00 be blank. But
+ * it doesn't make sense for dense data too, and we don't need three
+ * space characters. So we diverge in our implementation and display
+ * 0xff as lambda.
+ */
 const short kCp437[256] = /* clang-format off */ {
   0x00a0,0x263a,0x263b,0x2665,0x2666,0x2663,0x2660,0x2022, /*00: ☺☻♥♦♣♠•*/
   0x25d8,0x25cb,0x25d9,0x2642,0x2640,0x266a,0x266b,0x263c, /*08:◘○◙♂♀♪♫☼*/

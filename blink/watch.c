@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -16,6 +16,8 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
+#include "blink/watch.h"
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -24,7 +26,6 @@
 #include "blink/machine.h"
 #include "blink/modrm.h"
 #include "blink/rde.h"
-#include "blink/watch.h"
 #include "blink/x86.h"
 
 void PopWatchpoint(struct Watchpoints *wps) {
@@ -86,7 +87,7 @@ ssize_t IsAtWatchpoint(struct Watchpoints *wps, struct Machine *m) {
     m->ip = oldip;
     // TODO(jart): Handle case of overlapping page boundary.
     // TODO(jart): Possibly track munmap() type cases.
-    if ((r = LookupAddress(m, wps->p[i].addr))) {
+    if ((r = SpyAddress(m, wps->p[i].addr))) {
       w = Read64(r);
       if (!wps->p[i].initialized) {
         wps->p[i].oldvalue = w;

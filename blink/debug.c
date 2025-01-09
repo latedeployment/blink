@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -16,6 +16,8 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
+#include "blink/debug.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <setjmp.h>
@@ -29,7 +31,6 @@
 #include "blink/assert.h"
 #include "blink/builtin.h"
 #include "blink/bus.h"
-#include "blink/debug.h"
 #include "blink/dis.h"
 #include "blink/endian.h"
 #include "blink/flags.h"
@@ -58,7 +59,7 @@
 
 #define MAX_BACKTRACE_LINES 64
 
-#define APPEND(...) o += snprintf(b + o, n - o, __VA_ARGS__)
+#define APPEND(...) o += snprintf(b + o, o > n ? 0 : n - o, __VA_ARGS__)
 
 _Thread_local static jmp_buf g_busted;
 
@@ -135,22 +136,22 @@ int GetInstruction(struct Machine *m, i64 pc, struct XedDecodedInst *x) {
   int i, rc, err;
   u8 copy[15], *toil, *addr;
   BEGIN_NO_PAGE_FAULTS;
-  if ((addr = LookupAddress(m, pc))) {
+  if ((addr = SpyAddress(m, pc))) {
     if ((i = 4096 - (pc & 4095)) >= 15) {
-      if (!DecodeInstruction(x, addr, 15, m->mode)) {
+      if (!DecodeInstruction(x, addr, 15, m->mode.omode)) {
         rc = 0;
       } else {
         rc = kMachineDecodeError;
       }
-    } else if ((toil = LookupAddress(m, pc + i))) {
+    } else if ((toil = SpyAddress(m, pc + i))) {
       memcpy(copy, addr, i);
       memcpy(copy + i, toil, 15 - i);
-      if (!DecodeInstruction(x, copy, 15, m->mode)) {
+      if (!DecodeInstruction(x, copy, 15, m->mode.omode)) {
         rc = 0;
       } else {
         rc = kMachineDecodeError;
       }
-    } else if (!(err = DecodeInstruction(x, addr, i, m->mode))) {
+    } else if (!(err = DecodeInstruction(x, addr, i, m->mode.omode))) {
       rc = 0;
     } else if (err == XED_ERROR_BUFFER_TOO_SHORT) {
       rc = kMachineSegmentationFault;
@@ -255,13 +256,13 @@ const char *GetBacktrace(struct Machine *m) {
          "OPS %-16ld "
          "FLG %s\n\t"
          "%s\n\t",
-         m->cs.base + MaskAddress(m->mode, m->ip), DescribeOp(m, GetPc(m)),
-         Get64(m->ax), Get64(m->cx), Get64(m->dx), Get64(m->bx), Get64(m->sp),
-         Get64(m->bp), Get64(m->si), Get64(m->di), Get64(m->r8), Get64(m->r9),
-         Get64(m->r10), Get64(m->r11), Get64(m->r12), Get64(m->r13),
-         Get64(m->r14), Get64(m->r15), m->fs.base, m->gs.base,
-         GET_COUNTER(instructions_decoded), DescribeCpuFlags(m->flags),
-         g_progname);
+         m->cs.base + MaskAddress(m->mode.omode, m->ip),
+         DescribeOp(m, GetPc(m)), Get64(m->ax), Get64(m->cx), Get64(m->dx),
+         Get64(m->bx), Get64(m->sp), Get64(m->bp), Get64(m->si), Get64(m->di),
+         Get64(m->r8), Get64(m->r9), Get64(m->r10), Get64(m->r11),
+         Get64(m->r12), Get64(m->r13), Get64(m->r14), Get64(m->r15), m->fs.base,
+         m->gs.base, GET_COUNTER(instructions_decoded),
+         DescribeCpuFlags(m->flags), g_progname);
 
 #ifndef DISABLE_BACKTRACE
   rp = m->ip;
@@ -281,18 +282,18 @@ const char *GetBacktrace(struct Machine *m) {
     } else if (bp - sp <= 0x1000) {
       APPEND(" %" PRId64 " bytes", bp - sp);
     }
-    if (bp & kAlignmentMask[m->mode] && i) {
+    if (bp & kAlignmentMask[m->mode.omode] && i) {
       APPEND(" [MISALIGN]");
     }
     ++i;
     if (((m->ss.base + bp) & 0xfff) > 0xff0) break;
-    if (!(r = LookupAddress(m, m->ss.base + bp))) {
+    if (!(r = SpyAddress(m, m->ss.base + bp))) {
       APPEND(" [CORRUPT FRAME POINTER]");
       break;
     }
     sp = bp;
-    bp = ReadWordSafely(m->mode, r + 0);
-    rp = ReadWordSafely(m->mode, r + 8);
+    bp = ReadWordSafely(m->mode.omode, r + 0);
+    rp = ReadWordSafely(m->mode.omode, r + 8);
   }
   if (m->system->dis == &dis) {
     DisFree(&dis);

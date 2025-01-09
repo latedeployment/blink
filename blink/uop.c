@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -26,6 +26,7 @@
 #include "blink/bus.h"
 #include "blink/endian.h"
 #include "blink/flags.h"
+#include "blink/intrin.h"
 #include "blink/jit.h"
 #include "blink/log.h"
 #include "blink/machine.h"
@@ -86,6 +87,100 @@ const nexgen32e_f kConvert[] = {Convert16, Convert32, Convert64};
 
 #ifndef DISABLE_BMI2
 
+#if X86_INTRINSICS
+MICRO_OP i64 Adcx32(u64 x, u64 y, struct Machine *m) {
+  u32 z;
+  _Static_assert(CF == 1, "");
+  asm("btr\t$0,%1\n\t"
+      "adc\t%3,%0\n\t"
+      "adc\t$0,%1"
+      : "=&r" (z), "+&g" (m->flags) : "%0" ((u32)x), "g" ((u32)y) : "cc");
+  return z;
+}
+MICRO_OP i64 Adcx64(u64 x, u64 y, struct Machine *m) {
+  u64 z;
+  _Static_assert(CF == 1, "");
+  asm("btr\t$0,%1\n\t"
+      "adc\t%3,%0\n\t"
+      "adc\t$0,%1"
+      : "=&r" (z), "+&g" (m->flags) : "%0" (x), "g" (y) : "cc");
+  return z;
+}
+MICRO_OP i64 Adox32(u64 x, u64 y, struct Machine *m) {
+  u32 z, t;
+  asm("btr\t%5,%1\n\t"
+      "adc\t%4,%0\n\t"
+      "sbb\t%2,%2\n\t"
+      "and\t%6,%2\n\t"
+      "or\t%2,%1"
+      : "=&r" (z), "+&g" (m->flags), "=&r" (t)
+      : "%0" ((u32)x), "g" ((u32)y), "i" (FLAGS_OF), "i" (OF)
+      : "cc");
+  return z;
+}
+MICRO_OP i64 Adox64(u64 x, u64 y, struct Machine *m) {
+  u64 z;
+  u32 t;
+  asm("btr\t%5,%1\n\t"
+      "adc\t%4,%0\n\t"
+      "sbb\t%2,%2\n\t"
+      "and\t%6,%2\n\t"
+      "or\t%2,%1"
+      : "=&r" (z), "+&g" (m->flags), "=&r" (t)
+      : "%0" (x), "g" (y), "i" (FLAGS_OF), "i" (OF)
+      : "cc");
+  return z;
+}
+#elif ARM_INTRINSICS /* !X86_INTRINSICS */
+MICRO_OP i64 Adcx32(u64 x, u64 y, struct Machine *m) {
+  u64 f = m->flags, z;
+  _Static_assert(CF == 1, "");
+  asm("ror\t%1,%1,#1\n\t"
+      "adds\t%1,%1,%1\n\t"
+      "adcs\t%w0,%w2,%w3\n\t"
+      "adc\t%1,%1,xzr"
+      : "=&r" (z), "+&r" (f) : "%0" (x), "r" (y) : "cc");
+  m->flags = f;
+  return z;
+}
+MICRO_OP i64 Adcx64(u64 x, u64 y, struct Machine *m) {
+  u64 f = m->flags, z;
+  _Static_assert(CF == 1, "");
+  asm("ror\t%1,%1,#1\n\t"
+      "adds\t%1,%1,%1\n\t"
+      "adcs\t%0,%2,%3\n\t"
+      "adc\t%1,%1,xzr"
+      : "=&r" (z), "+&r" (f) : "%0" (x), "r" (y) : "cc");
+  m->flags = f;
+  return z;
+}
+MICRO_OP i64 Adox32(u64 x, u64 y, struct Machine *m) {
+  u64 f = m->flags, z;
+  asm("ror\t%1,%1,%4\n\t"
+      "adds\t%1,%1,%1\n\t"
+      "adcs\t%w0,%w2,%w3\n\t"
+      "adc\t%1,%1,xzr\n\t"
+      "ror\t%1,%1,%5"
+      : "=&r" (z), "+&r" (f)
+      : "%0" (x), "r" (y), "i" (FLAGS_OF + 1), "i" (64 - FLAGS_OF)
+      : "cc");
+  m->flags = f;
+  return z;
+}
+MICRO_OP i64 Adox64(u64 x, u64 y, struct Machine *m) {
+  u64 f = m->flags, z;
+  asm("ror\t%1,%1,%4\n\t"
+      "adds\t%1,%1,%1\n\t"
+      "adcs\t%0,%2,%3\n\t"
+      "adc\t%1,%1,xzr\n\t"
+      "ror\t%1,%1,%5"
+      : "=&r" (z), "+&r" (f)
+      : "%0" (x), "r" (y), "i" (FLAGS_OF + 1), "i" (64 - FLAGS_OF)
+      : "cc");
+  m->flags = f;
+  return z;
+}
+#else /* !ARM_INTRINSICS */
 MICRO_OP i64 Adcx32(u64 x, u64 y, struct Machine *m) {
   u32 t = x + !!(m->flags & CF);
   u32 z = t + y;
@@ -115,8 +210,9 @@ MICRO_OP i64 Adox64(u64 x, u64 y, struct Machine *m) {
   m->flags = (m->flags & ~OF) | c << FLAGS_OF;
   return z;
 }
+#endif /* !ARM_INTRINSICS */
 
-#endif /* DISABLE_BMI2 */
+#endif /* !DISABLE_BMI2 */
 
 ////////////////////////////////////////////////////////////////////////////////
 // BRANCHING
@@ -696,7 +792,8 @@ MICRO_OP void MovsdWpsVpsOp(u8 *p, struct Machine *m, long reg) {
   Write64(p, Read64(m->xmm[reg]));
 }
 
-#if defined(__x86_64__) && defined(TRIVIALLY_RELOCATABLE)
+#if (defined(__x86_64__) || defined(__aarch64__)) && \
+    defined(TRIVIALLY_RELOCATABLE)
 #define LOADSTORE "m"
 
 MICRO_OP static i64 NativeLoad8(const u8 *p) {
@@ -908,6 +1005,122 @@ const aluop_f kJustBsu32[8] = {
     (aluop_f)JustSar32,  //
 };
 
+#if X86_INTRINSICS
+#define ALU_FAST(M, TYPE, X, Y, OP, COMMUT)                             \
+  ({                                                                    \
+    TYPE Res;                                                           \
+    u32 OldFlags = (M)->flags & ~(OF | SF | ZF | AF | CF);              \
+    u64 NewFlags;                                                       \
+    asm(OP "\t%3,%0\n\t"                                                \
+        "pushfq\n\t"                                                    \
+        "pop\t%1"                                                       \
+        : "=&r" (Res), "=r" (NewFlags)                                  \
+        : COMMUT "0" ((TYPE)(X)), "g" ((TYPE)(Y))                       \
+        : "cc");                                                        \
+    (M)->flags = OldFlags | ((u32)NewFlags & (OF | SF | ZF | AF | CF)); \
+    Res;                                                                \
+  })
+#define ALU_FAST_CF(M, TYPE, X, Y, OP, COMMUT)                          \
+  ({                                                                    \
+    TYPE Res;                                                           \
+    u32 OldFlags = (M)->flags & ~(OF | SF | ZF | AF);                   \
+    u64 NewFlags;                                                       \
+    asm("btr\t%5,%2\n\t"                                                \
+        OP "\t%4,%0\n\t"                                                \
+        "pushfq\n\t"                                                    \
+        "pop\t%1"                                                       \
+        : "=&r" (Res), "=r" (NewFlags), "+&r" (OldFlags)                \
+        : COMMUT "0" ((TYPE)(X)), "g" ((TYPE)(Y)),                      \
+          "i" (FLAGS_CF)                                                \
+        : "cc");                                                        \
+    (M)->flags = OldFlags | ((u32)NewFlags & (OF | SF | ZF | AF | CF)); \
+    Res;                                                                \
+  })
+MICRO_OP static i64 FastXor64(struct Machine *m, u64 x, u64 y) {
+  return ALU_FAST(m, u64, x, y, "xor", "%");
+}
+MICRO_OP static i64 FastOr64(struct Machine *m, u64 x, u64 y) {
+  return ALU_FAST(m, u64, x, y, "or", "%");
+}
+MICRO_OP static i64 FastAnd64(struct Machine *m, u64 x, u64 y) {
+  return ALU_FAST(m, u64, x, y, "and", "%");
+}
+MICRO_OP static i64 FastSub64(struct Machine *m, u64 x, u64 y) {
+  return ALU_FAST(m, u64, x, y, "sub", "");
+}
+MICRO_OP static i64 FastAdd64(struct Machine *m, u64 x, u64 y) {
+  return ALU_FAST(m, u64, x, y, "add", "%");
+}
+MICRO_OP static i64 FastAdc64(struct Machine *m, u64 x, u64 y) {
+  return ALU_FAST_CF(m, u64, x, y, "adc", "%");
+}
+MICRO_OP static i64 FastSbb64(struct Machine *m, u64 x, u64 y) {
+  return ALU_FAST_CF(m, u64, x, y, "sbb", "");
+}
+MICRO_OP static i64 FastXor32(struct Machine *m, u64 x, u64 y) {
+  return ALU_FAST(m, u32, x, y, "xor", "%");
+}
+MICRO_OP static i64 FastOr32(struct Machine *m, u64 x, u64 y) {
+  return ALU_FAST(m, u32, x, y, "or", "%");
+}
+MICRO_OP static i64 FastAnd32(struct Machine *m, u64 x, u64 y) {
+  return ALU_FAST(m, u32, x, y, "and", "%");
+}
+MICRO_OP static i64 FastSub32(struct Machine *m, u64 x, u64 y) {
+  return ALU_FAST(m, u32, x, y, "sub", "");
+}
+MICRO_OP static i64 FastAdd32(struct Machine *m, u64 x, u64 y) {
+  return ALU_FAST(m, u32, x, y, "add", "%");
+}
+MICRO_OP static i64 FastAdc32(struct Machine *m, u64 x, u64 y) {
+  return ALU_FAST_CF(m, u32, x, y, "adc", "%");
+}
+MICRO_OP static i64 FastSbb32(struct Machine *m, u64 x, u64 y) {
+  return ALU_FAST_CF(m, u32, x, y, "sbb", "");
+}
+MICRO_OP static i64 FastXor16(struct Machine *m, u64 x, u64 y) {
+  return ALU_FAST(m, u16, x, y, "xor", "%");
+}
+MICRO_OP static i64 FastOr16(struct Machine *m, u64 x, u64 y) {
+  return ALU_FAST(m, u16, x, y, "or", "%");
+}
+MICRO_OP static i64 FastAnd16(struct Machine *m, u64 x, u64 y) {
+  return ALU_FAST(m, u16, x, y, "and", "%");
+}
+MICRO_OP static i64 FastSub16(struct Machine *m, u64 x, u64 y) {
+  return ALU_FAST(m, u16, x, y, "sub", "");
+}
+MICRO_OP static i64 FastAdd16(struct Machine *m, u64 x, u64 y) {
+  return ALU_FAST(m, u16, x, y, "add", "%");
+}
+MICRO_OP static i64 FastAdc16(struct Machine *m, u64 x, u64 y) {
+  return ALU_FAST_CF(m, u16, x, y, "adc", "%");
+}
+MICRO_OP static i64 FastSbb16(struct Machine *m, u64 x, u64 y) {
+  return ALU_FAST_CF(m, u16, x, y, "sbb", "");
+}
+MICRO_OP static i64 FastXor8(struct Machine *m, u64 x, u64 y) {
+  return ALU_FAST(m, u8, x, y, "xor", "%");
+}
+MICRO_OP static i64 FastOr8(struct Machine *m, u64 x, u64 y) {
+  return ALU_FAST(m, u8, x, y, "or", "%");
+}
+MICRO_OP static i64 FastAnd8(struct Machine *m, u64 x, u64 y) {
+  return ALU_FAST(m, u8, x, y, "and", "%");
+}
+MICRO_OP static i64 FastSub8(struct Machine *m, u64 x, u64 y) {
+  return ALU_FAST(m, u8, x, y, "sub", "");
+}
+MICRO_OP static i64 FastAdd8(struct Machine *m, u64 x, u64 y) {
+  return ALU_FAST(m, u8, x, y, "add", "%");
+}
+MICRO_OP static i64 FastAdc8(struct Machine *m, u64 x, u64 y) {
+  return ALU_FAST_CF(m, u8, x, y, "adc", "%");
+}
+MICRO_OP static i64 FastSbb8(struct Machine *m, u64 x, u64 y) {
+  return ALU_FAST_CF(m, u8, x, y, "sbb", "");
+}
+#else /* !X86_INTRINSICS */
 MICRO_OP static i64 FastXor64(struct Machine *m, u64 x, u64 y) {
   u64 z = x ^ y;
   m->flags = (m->flags & ~(CF | ZF)) | !z << FLAGS_ZF;
@@ -1075,6 +1288,7 @@ MICRO_OP static i64 FastSbb8(struct Machine *m, u64 x, u64 y) {
   m->flags = (m->flags & ~(CF | ZF)) | c << FLAGS_CF | !z << FLAGS_ZF;
   return z;
 }
+#endif /* !X86_INTRINSICS */
 
 const aluop_f kAluFast[8][4] = {
     {FastAdd8, FastAdd16, FastAdd32, FastAdd64},  //
@@ -1136,7 +1350,7 @@ MICRO_OP void Mulx64(u64 x,              //
   Put64(m->weg[vreg], z);
   Put64(m->weg[rexrreg], z >> 64);
 }
-#endif /* DISABLE_BMI2 */
+#endif /* !DISABLE_BMI2 */
 #endif /* HAVE_INT128 */
 
 MICRO_OP i64 JustNeg(u64 x) {
@@ -1217,10 +1431,11 @@ MICRO_OP void FastLeave(struct Machine *m) {
   Put64(m->bp, Read64(ToHost(v)));
 }
 
-MICRO_OP void FastRet(struct Machine *m) {
+MICRO_OP i64 PredictRet(struct Machine *m, i64 prediction) {
   u64 v = Get64(m->sp);
   Put64(m->sp, v + 8);
   m->ip = Read64(ToHost(v));
+  return m->ip ^ prediction;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1327,25 +1542,32 @@ static bool IsRet(u8 *p) {
 
 static long GetInstructionLength(u8 *p) {
 #if defined(__aarch64__)
-#ifndef NDEBUG
-  if ((Get32(p) & ~kArmDispMask) == kArmJmp) return -1;
-  if ((Get32(p) & ~kArmDispMask) == kArmCall) return -1;
-#endif
+  // on AArch64, do not recognize instructions which are known to be not
+  // trivially relocatable i.e. opcodes which do PC-relative addressing;
+  // but as exceptions, allow CBZ, CBNZ, TBZ, TBNZ, & B.cond
+  u32 ins = Get32(p);
+  if ((ins & ~kArmDispMask) == kArmJmp) return -1;
+  if ((ins & ~kArmDispMask) == kArmCall) return -1;
+  if ((ins & kArmAdrMask) == kArmAdr) return -1;
+  if ((ins & kArmAdrpMask) == kArmAdrp) return -1;
+  if ((ins & kArmLdrPcMask) == kArmLdrPc) return -1;
+  if ((ins & kArmLdrswPcMask) == kArmLdrswPc) return -1;
+  if ((ins & kArmPrfmPcMask) == kArmPrfmPc) return -1;
   return 4;
-#elif defined(__x86_64__)
+#elif defined(__x86_64__) /* !__aarch64__ */
   struct XedDecodedInst x;
   unassert(!DecodeInstruction(&x, p, 15, XED_MODE_LONG));
 #ifndef NDEBUG
   if (ClassifyOp(x.op.rde) == kOpBranching) return -1;
   if (UsesStaticMemory(x.op.rde)) return -1;
-#endif
+#endif /* NDEBUG */
   return x.length;
-#else
+#else /* !__x86_64__ */
   __builtin_unreachable();
-#endif
+#endif /* !__x86_64__ */
 }
 
-long GetMicroOpLengthImpl(void *uop) {
+static long GetMicroOpLengthImpl(void *uop) {
   long k, n = 0;
   for (;;) {
     if (IsRet((u8 *)uop + n)) return n;
@@ -1355,7 +1577,7 @@ long GetMicroOpLengthImpl(void *uop) {
   }
 }
 
-long GetMicroOpLength(void *uop) {
+static long GetMicroOpLength(void *uop) {
   _Static_assert(IS2POW(kMaxOps), "");
   static unsigned count;
   static void *ops[kMaxOps * 2];
@@ -1390,6 +1612,32 @@ static inline unsigned CheckBelow(unsigned x, unsigned n) {
   return x;
 }
 
+static void CallFunction(struct Machine *m, void *fun) {
+  AppendJitCall(m->path.jb, fun);
+  ClobberEverythingExceptResult(m);
+}
+
+static void CallMicroOp(struct Machine *m, void *fun) {
+#ifdef TRIVIALLY_RELOCATABLE
+  long len;
+  if ((len = GetMicroOpLength(fun)) > 0) {
+    AppendJit(m->path.jb, fun, len);
+  } else {
+    LOG_ONCE(LOGF("jit micro-operation at address %" PRIxPTR
+                  " has branches or static memory references",
+                  (uintptr_t)fun));
+    CallFunction(m, fun);
+  }
+#else
+  CallFunction(m, fun);
+#endif
+}
+
+static void GetReg_32_64(struct Machine *m, void *fun) {
+  AppendJitMovReg(m->path.jb, kJitArg0, kJitSav0);
+  CallMicroOp(m, fun);
+}
+
 static void GetReg(P, unsigned log2sz, unsigned reg, unsigned breg) {
   switch (log2sz) {
     case 0:
@@ -1400,16 +1648,10 @@ static void GetReg(P, unsigned log2sz, unsigned reg, unsigned breg) {
              (u64)kByteReg[breg], kGetReg[0]);
       break;
     case 2:
-      Jitter(A,
-             "q"   // arg0 = machine
-             "m",  // call micro-op
-             kGetReg32[reg]);
+      GetReg_32_64(m, kGetReg32[reg]);
       break;
     case 3:
-      Jitter(A,
-             "q"   // arg0 = machine
-             "m",  // call micro-op
-             kGetReg64[reg]);
+      GetReg_32_64(m, kGetReg64[reg]);
       break;
     default:
       Jitter(A,
@@ -1419,6 +1661,14 @@ static void GetReg(P, unsigned log2sz, unsigned reg, unsigned breg) {
              (u64)reg, kGetReg[log2sz]);
       break;
   }
+}
+
+static void PutReg_32_64(struct Machine *m, void *fun) {
+  ItemsRequired(1);
+  AppendJitMovReg(m->path.jb, kJitArg1, kJitSav0);
+  AppendJitMovReg(m->path.jb, kJitArg0, stack[i - 1]);
+  CallMicroOp(m, fun);
+  --i;
 }
 
 static void PutReg(P, unsigned log2sz, unsigned reg, unsigned breg) {
@@ -1442,20 +1692,10 @@ static void PutReg(P, unsigned log2sz, unsigned reg, unsigned breg) {
              (u64)reg, kPutReg[1]);
       break;
     case 2:
-      ItemsRequired(1);
-      Jitter(A,
-             "s0a1="  // arg1 = machine
-             "a0="    // arg0 = <pop>
-             "m",     // call micro-op
-             kPutReg32[reg]);
+      PutReg_32_64(m, kPutReg32[reg]);
       break;
     case 3:
-      ItemsRequired(1);
-      Jitter(A,
-             "s0a1="  // arg1 = machine
-             "a0="    // arg0 = <pop>
-             "m",     // call micro-op
-             kPutReg64[reg]);
+      PutReg_32_64(m, kPutReg64[reg]);
       break;
     case 4:
       // note: r0 == a0 on aarch64
@@ -1514,30 +1754,12 @@ static unsigned JitterImpl(P, const char *fmt, va_list va, unsigned k,
         break;
 
       case 'm':  // micro-op
-#ifdef TRIVIALLY_RELOCATABLE
-      {
-        void *fun = va_arg(va, void *);
-        long len = GetMicroOpLength(fun);
-        if (len > 0) {
-          AppendJit(m->path.jb, fun, len);
-        } else {
-          LOG_ONCE(LOGF("jit micro-operation at address %" PRIxPTR
-                        " has branches or static memory references",
-                        (uintptr_t)fun));
-          AppendJitCall(m->path.jb, fun);
-        }
+        CallMicroOp(m, va_arg(va, void *));
         break;
-      }
-#endif
 
-      case 'c': {  // call
-        void *fun = va_arg(va, void *);
-        if (fun == (void *)(uintptr_t)Sub64) LogCodOp(m, "Sub64");
-        if (fun == (void *)(uintptr_t)Add64) LogCodOp(m, "Add64");
-        AppendJitCall(m->path.jb, fun);
-        ClobberEverythingExceptResult(m);
+      case 'c':  // call
+        CallFunction(m, va_arg(va, void *));
         break;
-      }
 
       case 'r':  // push res reg
         stack[i++] = kJitRes[CheckBelow(fmt[k++] - '0', ARRAYLEN(kJitRes))];
@@ -1710,7 +1932,7 @@ static unsigned JitterImpl(P, const char *fmt, va_list va, unsigned k,
 
       case 'L':  // load effective address
         if (!SibExists(rde) && IsRipRelative(rde)) {
-          Jitter(A, "r0i", disp + m->ip);  // res0 = absolute
+          AppendJitSetReg(m->path.jb, kJitRes0, disp + m->ip);
         } else if (!SibExists(rde)) {
           if (disp) {
             Jitter(A,
@@ -1729,12 +1951,10 @@ static unsigned JitterImpl(P, const char *fmt, va_list va, unsigned k,
           Jitter(A, "r0i", disp);  // res0 = absolute
         } else if (SibHasBase(rde) && !SibHasIndex(rde)) {
           if (disp) {
-            Jitter(A,
-                   "a2i"  // arg2 = address base register index
-                   "a1i"  // arg1 = displacement
-                   "q"    // arg0 = machine
-                   "m",   // call micro-op
-                   RexbBase(rde), disp, Base);
+            AppendJitSetReg(m->path.jb, kJitArg2, RexbBase(rde));
+            AppendJitSetReg(m->path.jb, kJitArg1, disp);
+            AppendJitMovReg(m->path.jb, kJitArg0, kJitSav0);
+            CallMicroOp(m, Base);
           } else {
             Jitter(A,
                    "q"   // arg0 = machine

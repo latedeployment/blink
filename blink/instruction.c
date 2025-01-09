@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -46,7 +46,7 @@ static bool IsOpcodeEqual(struct XedDecodedInst *xedd, u8 *a) {
 static int ReadInstruction(struct Machine *m, u8 *p, unsigned n) {
   struct XedDecodedInst xedd[1];
   STATISTIC(++instructions_decoded);
-  if (!DecodeInstruction(xedd, p, n, m->mode)) {
+  if (!DecodeInstruction(xedd, p, n, m->mode.omode)) {
     memcpy(m->xedd, xedd, kInstructionBytes);
     return 0;
   } else {

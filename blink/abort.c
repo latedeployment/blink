@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2023 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -18,20 +18,30 @@
 ╚─────────────────────────────────────────────────────────────────────────────*/
 #include <stdlib.h>
 
+#include "blink/assert.h"
+#include "blink/macros.h"
 #include "blink/stats.h"
 #include "blink/util.h"
 
-bool g_exitdontabort;
+static struct AbortHooks {
+  int n;
+  aborthook_f *p[4];
+} g_aborthooks;
+
+void AtAbort(aborthook_f *hook) {
+  unassert(g_aborthooks.n < ARRAYLEN(g_aborthooks.p));
+  g_aborthooks.p[g_aborthooks.n++] = hook;
+}
 
 void Abort(void) {
+  int i;
 #ifndef NDEBUG
   if (FLAG_statistics) {
     PrintStats();
   }
 #endif
-  if (g_exitdontabort) {
-    exit(1);
-  } else {
-    abort();
+  for (i = g_aborthooks.n; i--;) {
+    g_aborthooks.p[i]();
   }
+  abort();
 }

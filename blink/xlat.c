@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -16,6 +16,8 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
+#include "blink/xlat.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -46,7 +48,6 @@
 #include "blink/ndelay.h"
 #include "blink/sigwinch.h"
 #include "blink/util.h"
-#include "blink/xlat.h"
 
 #if defined(__APPLE__) || defined(__NetBSD__)
 #define st_atim st_atimespec

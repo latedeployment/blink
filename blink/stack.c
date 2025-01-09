@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -109,12 +109,12 @@ static void PushN(P, u64 x, unsigned mode, unsigned osz) {
 }
 
 void Push(P, u64 x) {
-  PushN(A, x, Eamode(rde), kStackOsz[Osz(rde)][Mode(rde)]);
+  PushN(A, x, Mode(rde), kStackOsz[Osz(rde)][Mode(rde)]);
 }
 
 void OpPushZvq(P) {
   int osz = kStackOsz[Osz(rde)][Mode(rde)];
-  PushN(A, ReadStackWord(RegRexbSrm(m, rde), osz), Eamode(rde), osz);
+  PushN(A, ReadStackWord(RegRexbSrm(m, rde), osz), Mode(rde), osz);
   if (IsMakingPath(m) && HasLinearMapping() && !Osz(rde)) {
     Jitter(A,
            "a1i"
@@ -127,7 +127,7 @@ static u64 PopN(P, u16 extra, unsigned osz) {
   u64 v;
   u8 b[8];
   void *p[2];
-  switch (Eamode(rde)) {
+  switch (Mode(rde)) {
     case XED_MODE_LONG:
       v = Get64(m->sp);
       Put64(m->sp, v + osz + extra);
@@ -217,22 +217,47 @@ void OpJmpEq(P) {
   m->ip = LoadAddressFromMemory(A);
 }
 
+void OpEnter(P) {
+  u16 allocsz = (u16)uimm0;
+  u8 nesting = (u8)(uimm0 >> 16);
+  unsigned osz = kStackOsz[Osz(rde)][Mode(rde)];
+  if (nesting != 0) OpUdImpl(m);
+  Push(A, Get64(m->bp));
+  switch (osz) {
+    case 8:
+      Put64(m->bp, Get64(m->sp));
+      Put64(m->sp, Get64(m->sp) - allocsz);
+      break;
+    case 4:
+      Put64(m->bp, Get32(m->sp));
+      Put64(m->sp, Get32(m->sp) - allocsz);
+      break;
+    case 2:
+      Put16(m->bp, Get16(m->sp));
+      Put16(m->sp, Get16(m->sp) - allocsz);
+      break;
+    default:
+      __builtin_unreachable();
+  }
+}
+
 void OpLeave(P) {
-  switch (Eamode(rde)) {
-    case XED_MODE_LONG:
+  unsigned osz = kStackOsz[Osz(rde)][Mode(rde)];
+  switch (osz) {
+    case 8:
       Put64(m->sp, Get64(m->bp));
       Put64(m->bp, Pop(A, 0));
       if (HasLinearMapping() && IsMakingPath(m)) {
         Jitter(A, "m", FastLeave);
       }
       break;
-    case XED_MODE_LEGACY:
+    case 4:
       Put64(m->sp, Get32(m->bp));
-      Put64(m->bp, Pop(A, 0));
+      Put64(m->bp, PopN(A, osz, 0));
       break;
-    case XED_MODE_REAL:
+    case 2:
       Put16(m->sp, Get16(m->bp));
-      Put16(m->bp, Pop(A, 0));
+      Put16(m->bp, PopN(A, osz, 0));
       break;
     default:
       __builtin_unreachable();
@@ -242,7 +267,32 @@ void OpLeave(P) {
 void OpRet(P) {
   m->ip = Pop(A, 0);
   if (IsMakingPath(m) && HasLinearMapping() && !Osz(rde)) {
-    Jitter(A, "m", FastRet);
+#ifdef __x86_64__
+    Jitter(A,
+           "a1i"  // arg1 = prediction
+           "m"    // call micro-op (PredictRet)
+           "q",   // arg0 = machine
+           m->ip, PredictRet);
+    AlignJit(m->path.jb, 8, 3);
+    u8 code[] = {
+        0x48, 0x85, 0300 | kJitRes0 << 3 | kJitRes0,  // test %rax,%rax
+        0x75, 0x05,                                   // jnz   +5
+    };
+#else
+    Jitter(A,
+           "a1i"    // arg1 = prediction
+           "m"      // call micro-op (PredictRet)
+           "r0a2="  // arg2 = res0
+           "q",     // arg0 = machine
+           m->ip, PredictRet);
+    u32 code[] = {
+        0xb5000000 | (8 / 4) << 5 | kJitArg2,  // cbnz x2,#8
+    };
+#endif
+    AppendJit(m->path.jb, code, sizeof(code));
+    Connect(A, m->ip, true);
+    AppendJitJump(m->path.jb, (void *)m->system->ender);
+    FinishPath(m);
   }
 }
 

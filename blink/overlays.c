@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2023 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -16,6 +16,8 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
+#include "blink/overlays.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
@@ -30,7 +32,6 @@
 #include "blink/fspath.h"
 #include "blink/likely.h"
 #include "blink/log.h"
-#include "blink/overlays.h"
 #include "blink/syscall.h"
 #include "blink/thompike.h"
 #include "blink/util.h"

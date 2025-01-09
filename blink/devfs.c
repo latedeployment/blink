@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2023 Trung Nguyen                                                  │
 │                                                                              │
@@ -17,6 +17,10 @@
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
 #include "blink/devfs.h"
+
+#include <stdlib.h>
+#include <string.h>
+
 #include "blink/errno.h"
 #include "blink/hostfs.h"
 #include "blink/log.h"
@@ -25,6 +29,7 @@
 
 static int DevfsInit(const char *source, u64 flags, const void *data,
                      struct VfsDevice **device, struct VfsMount **mount) {
+  int ret;
   if (source == NULL) {
     return efault();
   }
@@ -32,15 +37,35 @@ static int DevfsInit(const char *source, u64 flags, const void *data,
     source = "/dev";
   }
   VFS_LOGF("real devfs not implemented, delegating to hostfs");
-  return HostfsInit(source, flags, data, device, mount);
+  if ((ret = HostfsInit(source, flags, data, device, mount)) != -1) {
+    (*device)->ops = &g_devfs.ops;
+  }
+  return ret;
+}
+
+static int DevfsReadmountentry(struct VfsDevice *device, char **spec,
+                               char **type, char **mntops) {
+  *spec = strdup("none");
+  if (*spec == NULL) {
+    return enomem();
+  }
+  *type = strdup("devtmpfs");
+  if (type == NULL) {
+    free(*spec);
+    return enomem();
+  }
+  *mntops = NULL;
+  return 0;
 }
 
 struct VfsSystem g_devfs = {.name = "devfs",
+                            .nodev = true,
                             .ops = {
                                 .Init = DevfsInit,
                                 .Freeinfo = HostfsFreeInfo,
                                 .Freedevice = HostfsFreeDevice,
                                 .Finddir = HostfsFinddir,
+                                .Readmountentry = DevfsReadmountentry,
                                 .Readlink = HostfsReadlink,
                                 .Mkdir = HostfsMkdir,
                                 .Mkfifo = HostfsMkfifo,
@@ -119,7 +144,9 @@ struct VfsSystem g_devfs = {.name = "devfs",
                                 .Tcgetsid = NULL,
                                 .Tcgetpgrp = NULL,
                                 .Tcsetpgrp = NULL,
+#ifdef HAVE_SOCKATMARK
                                 .Sockatmark = NULL,
+#endif
                                 .Fexecve = NULL,
                             }};
 

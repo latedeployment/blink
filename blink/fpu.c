@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -16,6 +16,8 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
+#include "blink/fpu.h"
+
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,7 +27,6 @@
 #include "blink/case.h"
 #include "blink/endian.h"
 #include "blink/flags.h"
-#include "blink/fpu.h"
 #include "blink/ldbl.h"
 #include "blink/machine.h"
 #include "blink/macros.h"
@@ -1030,7 +1031,7 @@ void OpFpu(P) {
   bool ismemory;
   op = Opcode(rde) & 7;
   ismemory = ModrmMod(rde) != 3;
-  m->fpu.ip = MaskAddress(m->mode, m->ip - Oplength(rde));
+  m->fpu.ip = MaskAddress(m->mode.omode, m->ip - Oplength(rde));
   m->fpu.op = op << 8 | ModrmMod(rde) << 6 | ModrmReg(rde) << 3 | ModrmRm(rde);
   m->fpu.dp = ismemory ? ComputeAddress(A) : 0;
   switch (DISP(op, ismemory, ModrmReg(rde))) {

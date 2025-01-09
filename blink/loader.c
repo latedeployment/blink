@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -16,6 +16,8 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
+#include "blink/loader.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -28,15 +30,17 @@
 #include <unistd.h>
 
 #include "blink/assert.h"
+#include "blink/biosrom.h"
 #include "blink/builtin.h"
 #include "blink/end.h"
 #include "blink/endian.h"
-#include "blink/loader.h"
+#include "blink/flags.h"
 #include "blink/log.h"
 #include "blink/machine.h"
 #include "blink/macros.h"
 #include "blink/map.h"
 #include "blink/overlays.h"
+#include "blink/procfs.h"
 #include "blink/random.h"
 #include "blink/tunables.h"
 #include "blink/util.h"
@@ -45,6 +49,10 @@
 
 #define READ64(p) Read64((const u8 *)(p))
 #define READ32(p) Read32((const u8 *)(p))
+
+#ifndef __COSMOPOLITAN__
+#define IsWindows() 0
+#endif
 
 static bool CanEmulateImpl(struct Machine *, char **, char ***, bool);
 
@@ -126,7 +134,7 @@ static i64 LoadElfLoadSegment(struct Machine *m, const char *path, void *image,
     ERRF("bad phdr filesz");
     exit(127);
   }
-  if (offset + filesz > imagesize) {
+  if (filesz && offset + filesz > imagesize) {
     ERRF("corrupt elf program header");
     exit(127);
   }
@@ -240,7 +248,8 @@ static i64 LoadElfLoadSegment(struct Machine *m, const char *path, void *image,
 static bool IsFreebsdExecutable(Elf64_Ehdr_ *ehdr, size_t size) {
   // APE uses the FreeBSD OS ABI too, but never with ET_DYN
   return Read16(ehdr->type) == ET_DYN_ &&
-         ehdr->ident[EI_OSABI_] == ELFOSABI_FREEBSD_;
+         ehdr->ident[EI_OSABI_] == ELFOSABI_FREEBSD_ &&
+         ehdr->ident[EI_VERSION_] == 1;
 }
 
 static bool IsOpenbsdExecutable(struct Elf64_Ehdr_ *ehdr, size_t size) {
@@ -293,9 +302,12 @@ static void ExplainWhyItCantBeEmulated(const char *path, const char *reason) {
 }
 
 static bool IsBinFile(const char *prog) {
-  return endswith(prog, ".bin") ||  //
-         endswith(prog, ".img") ||  //
-         endswith(prog, ".raw");
+  return EndsWith(prog, ".bin") ||  //
+         EndsWith(prog, ".BIN") ||  //
+         EndsWith(prog, ".img") ||  //
+         EndsWith(prog, ".IMG") ||  //
+         EndsWith(prog, ".raw") ||  //
+         EndsWith(prog, ".RAW");
 }
 
 bool IsSupportedExecutable(const char *path, void *image, size_t size) {
@@ -310,8 +322,8 @@ bool IsSupportedExecutable(const char *path, void *image, size_t size) {
       ExplainWhyItCantBeEmulated(path, "ELF is neither ET_EXEC or ET_DYN");
       return false;
     }
-    if (ehdr->ident[EI_CLASS_] != ELFCLASS64_) {
-      ExplainWhyItCantBeEmulated(path, "ELF is not 64-bit");
+    if (ehdr->ident[EI_CLASS_] == ELFCLASS32_) {
+      ExplainWhyItCantBeEmulated(path, "32-bit ELF not supported");
       return false;
     }
     if (Read16(ehdr->machine) != EM_NEXGEN32E_) {
@@ -405,7 +417,7 @@ static bool LoadElf(struct Machine *m,  //
                            Read16(ehdr->phentsize) * i);
     switch (Read32(phdr->type)) {
       case PT_GNU_STACK_:
-        execstack = false;
+        execstack = Read32(phdr->flags) & PF_X_;
         break;
       case PT_LOAD_:
         end = LoadElfLoadSegment(m, elf->execfn, ehdr, esize, phdr, end, &prot,
@@ -451,10 +463,7 @@ static bool LoadElf(struct Machine *m,  //
         &elf->at_base);
     m->ip = elf->at_base + Read64(ehdri->entry);
     for (prot = i = 0; i < Read16(ehdri->phnum); ++i) {
-      phdr = GetElfSegmentHeaderAddress(ehdri, st.st_size, i);
-      CheckElfAddress(ehdri, st.st_size,
-                      (uintptr_t)ehdri + Read64(phdr->offset),
-                      Read64(phdr->filesz));
+      phdr = GetElfProgramHeaderAddress(ehdri, st.st_size, i);
       switch (Read32(phdr->type)) {
         case PT_LOAD_:
           end = LoadElfLoadSegment(m, elf->interpreter, ehdri, st.st_size, phdr,
@@ -470,20 +479,30 @@ static bool LoadElf(struct Machine *m,  //
   return execstack;
 }
 
-static void BootProgram(struct Machine *m,  //
-                        struct Elf *elf,    //
-                        void *map,          //
-                        size_t mapsize) {
-  m->cs.sel = m->cs.base = 0;
+void BootProgram(struct Machine *m,  //
+                 struct Elf *elf,    //
+                 u8 bootdrive) {
+  int fd;
+  SetDefaultBiosIntVectors(m);
+  memset(m->beg, 0, sizeof(m->beg));  // reinitialize registers
+  memset(m->seg, 0, sizeof(m->seg));
+  m->flags = SetFlag(m->flags, FLAGS_IF, 1);
   m->ip = 0x7c00;
   elf->base = 0x7c00;
-  memset(m->system->real, 0, 0x00f00000);
-  Write16(m->system->real + 0x400, 0x3F8);
-  Write16(m->system->real + 0x40E, 0xb0000 >> 4);
-  Write16(m->system->real + 0x413, 0xb0000 / 1024);
-  Write16(m->system->real + 0x44A, 80);
-  Write64(m->dx, 0);
-  memcpy(m->system->real + 0x7c00, map, 512);
+  Write64(m->sp, 0x6f00);  // following QEMU
+  m->dl = bootdrive;
+  SetDefaultBiosDataArea(m);
+  memset(m->system->real + 0x500, 0, kBiosOptBase - 0x500);
+  memset(m->system->real + 0x00100000, 0, kRealSize - 0x00100000);
+  if ((fd = VfsOpen(AT_FDCWD, m->system->elf.prog, O_RDONLY, 0)) == -1 ||
+      VfsRead(fd, m->system->real + 0x7c00, 512) <= 0) {
+    // if we failed to load the boot sector for whatever reason, then...
+    // ...arrange to invoke int 0x18 (diskless boot hook)
+    // TODO: maybe error out more quickly?
+    Write16(m->system->real + 0x7c00, 0x18CD);
+  }
+  VfsClose(fd);
+  SetWriteAddr(m, 0x7c00, 512);
 }
 
 static int GetElfHeader(char ehdr[64], const char *prog, const char *image) {
@@ -538,7 +557,7 @@ static int CheckExecutableFile(const char *prog, const struct stat *st) {
     errno = EACCES;
     return -1;
   }
-  if (!(st->st_mode & 0111) && !IsBinFile(prog)) {
+  if (!IsWindows() && !(st->st_mode & 0111) && !IsBinFile(prog)) {
     LOGF("execve needs chmod +x");
     errno = EACCES;
     return -1;
@@ -658,7 +677,7 @@ static int CanEmulateData(struct Machine *m, char **prog, char ***argv,
 }
 
 void LoadProgram(struct Machine *m, char *execfn, char *prog, char **args,
-                 char **vars) {
+                 char **vars, const char *biosprog) {
   int fd;
   i64 stack;
   void *map;
@@ -735,9 +754,10 @@ error: unsupported executable; we need:\n\
     m->system->brk ^= Read64(elf->rng) & FLAG_aslrmask;
     m->system->automap ^= (Read64(elf->rng) & FLAG_aslrmask);
   }
-  if (m->mode == XED_MODE_REAL) {
-    BootProgram(m, elf, map, mapsize);
-    if (endswith(prog, ".com")) {
+  if (m->mode.genmode == XED_GEN_MODE_REAL) {
+    LoadBios(m, biosprog);
+    if (EndsWith(prog, ".com") ||  //
+        EndsWith(prog, ".COM")) {
       // cosmo convention (see also binbase)
       AddFileMap(m->system, 4 * 1024 * 1024, 512, prog, 0);
     } else {
@@ -745,6 +765,8 @@ error: unsupported executable; we need:\n\
       AddFileMap(m->system, 0, 512, prog, 0);
     }
   } else {
+    m->flags = SetFlag(m->flags, FLAGS_IF, 1);
+    m->system->cr0 = CR0_PE | CR0_MP | CR0_ET | CR0_PG;
     m->system->cr3 = AllocatePageTable(m->system);
     if (IsBinFile(prog)) {
       elf->base = 0x400000;
@@ -755,6 +777,9 @@ error: unsupported executable; we need:\n\
     } else if (READ64(map) == READ64("MZqFpD='") ||
                READ64(map) == READ64("jartsr='")) {
       m->system->iscosmo = true;
+      // Cosmopolitan programs pretty much require at least 47-bit virtual
+      // addresses; if the host lacks these, then emulate them w/ software
+      if (FLAG_vabits < 47) FLAG_nolinear = true;
       if (GetElfHeader(tmp, prog, (const char *)map) == -1) exit(127);
       memcpy(map, tmp, 64);
       execstack = LoadElf(m, elf, (Elf64_Ehdr_ *)map, mapsize, fd);
@@ -788,6 +813,9 @@ error: unsupported executable; we need:\n\
   unassert(!VfsMunmap(map, mapsize));
   unassert(!VfsClose(fd));
   m->system->loaded = true;
+#ifndef DISABLE_VFS
+  unassert(!ProcfsRegisterExe(getpid(), elf->prog));
+#endif
 }
 
 static bool CanEmulateImpl(struct Machine *m, char **prog, char ***argv,

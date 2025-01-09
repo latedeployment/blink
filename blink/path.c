@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -37,7 +37,7 @@
 #include "blink/stats.h"
 #include "blink/vfs.h"
 
-#define APPEND(...) o += snprintf(b + o, n - o, __VA_ARGS__)
+#define APPEND(...) o += snprintf(b + o, o > n ? 0 : n - o, __VA_ARGS__)
 
 #ifdef HAVE_JIT
 
@@ -54,7 +54,7 @@ static void StartPath(struct Machine *m, i64 pc) {
 
 static void DebugOp(struct Machine *m, i64 expected_ip) {
   if (m->ip != expected_ip) {
-    LOGF("IP was %" PRIx64 " but it should have been %" PRIx64, m->ip,
+    ERRF("IP was %" PRIx64 " but it should have been %" PRIx64, m->ip,
          expected_ip);
   }
   unassert(m->ip == expected_ip);
@@ -520,7 +520,7 @@ static bool MustUpdateIp(P) {
   u64 next;
   if (!IsPure(rde)) return true;
   next = m->ip + Oplength(rde);
-  if (GetJitHook(&m->system->jit, next, 0)) return true;
+  if (GetJitHook(&m->system->jit, next)) return true;
   return false;
 }
 

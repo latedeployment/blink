@@ -10,19 +10,21 @@
 #include "blink/builtin.h"
 #include "blink/types.h"
 
+typedef void aborthook_f(void);
+
 extern int optind_;
 extern char *optarg_;
 extern const short kCp437[256];
-extern bool g_exitdontabort;
 
 _Noreturn void Abort(void);
+void AtAbort(aborthook_f *);
 char *GetStartDir(void);
 int GetOpt(int, char *const[], const char *);
-u64 tpenc(wint_t);
+u64 tpenc(uint32_t);
 const char *DescribeSignal(int);
 const char *DescribeHostErrno(int);
-bool endswith(const char *, const char *);
-bool startswith(const char *, const char *);
+bool EndsWith(const char *, const char *);
+bool StartsWith(const char *, const char *);
 const char *doublenul(const char *, unsigned);
 ssize_t readansi(int, char *, size_t);
 char *FormatInt64(char *, int64_t);

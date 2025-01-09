@@ -53,6 +53,9 @@ if [ "$1" = "--help" ]; then
   echo "  --prefix=PATH"
   echo "    configures system install path (defaults to /usr/local)"
   echo
+  echo "  --enable-vfs"
+  echo "    enables true filesystem emulation support (overlays alternative)"
+  echo
   echo "  --disable-jit"
   echo "    forces jit compilation to be disabled (shaves ~26kb off MODE=tiny)"
   echo
@@ -100,6 +103,9 @@ if [ "$1" = "--help" ]; then
   echo
   echo "  --disable-bcd"
   echo "    disables i8086 binary coded decimal support (shaves ~1kb off MODE=tiny)"
+  echo
+  echo "  --disable-rom"
+  echo "    disables write protection of metal bios (shaves ~600 bytes off MODE=tiny)"
   echo
   echo "  --disable-all"
   echo "    disable all optional features (shaves ~81kb off MODE=tiny)"
@@ -409,6 +415,11 @@ for x; do
   elif [ x"$x" = x"--disable-bcd" ]; then
     uncomment "#define DISABLE_BCD"
 
+  elif [ x"$x" = x"--enable-rom" ]; then
+    comment "#define DISABLE_ROM"
+  elif [ x"$x" = x"--disable-rom" ]; then
+    uncomment "#define DISABLE_ROM"
+
   elif [ x"$x" = x"--posix" ]; then
     CPPFLAGS="-D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700 -std=c11"
     POSIX=1
@@ -537,6 +548,12 @@ if config noop "checking for -fno-stack-protector... "; then
   UOPFLAGS="-fno-stack-protector ${UOPFLAGS}"
 fi
 
+# avoid cosmo libc function call tracing messing up micro-ops
+EXTRA_CFLAGS=-fpatchable-function-entry=0,0
+if config noop "checking for -fpatchable-function-entry=0,0... "; then
+  UOPFLAGS="-fpatchable-function-entry=0,0 ${UOPFLAGS}"
+fi
+
 # avoid creating stack frames in micro-op functions
 if [ "${MODE}" != "prof" ]; then
   EXTRA_CFLAGS=-fomit-frame-pointer
@@ -569,6 +586,16 @@ if [ -z "${MODE}" ] && [ -n "${JIT_POSSIBLE}" ] && [ -z "${DISABLE_JIT}" ]; then
   EXTRA_CFLAGS=-fno-optimize-sibling-calls
   if config noop "checking for -fno-optimize-sibling-calls... "; then
     CFLAGS="${CFLAGS} -fno-optimize-sibling-calls"
+  fi
+fi
+
+# the new intel cet instructions may interfere with jit, and only
+# offer improved security if the os and cpu both know about them;
+# we can revisit cet later when it becomes more mainstream
+if [ -n "${JIT_POSSIBLE}" ] && [ -z "${DISABLE_JIT}" ]; then
+  EXTRA_CFLAGS=-fcf-protection=none
+  if config noop "checking for -fcf-protection=none... "; then
+    CFLAGS="${CFLAGS} -fcf-protection=none"
   fi
 fi
 
@@ -605,7 +632,7 @@ fi
 
 # attempt to polyfill c11 atomics if it's not available
 if ! config stdatomic "checking for stdatomic.h... "; then
-  CPPFLAGS="-isystem tool/stdatomic"
+  CPPFLAGS="-isystem tool/stdatomic ${CPPFLAGS}"
 fi
 
 if [ -z "${DISABLE_FORK}" ]; then
@@ -636,10 +663,12 @@ if [ -z "${POSIX}" ]; then
   ( config setgroups "checking for setgroups()... " uncomment "#define HAVE_SETGROUPS" ) &
   ( config vasprintf "checking for vasprintf()... " uncomment "#define HAVE_VASPRINTF" ) &
   ( config strchrnul "checking for strchrnul()... " uncomment "#define HAVE_STRCHRNUL" ) &
+  ( config mkfifo "checking for mkfifo()... " uncomment "#define HAVE_MKFIFO" ) &
   ( config mkfifoat "checking for mkfifoat()... " uncomment "#define HAVE_MKFIFOAT" ) &
   ( config preadv "checking for preadv() and pwritev()... " uncomment "#define HAVE_PREADV" ) &
   ( config wait4 "checking for wait4()... " uncomment "#define HAVE_WAIT4" ) &
   ( config setresuid "checking for setresuid()... " uncomment "#define HAVE_SETRESUID" ) &
+  ( config sys_mount_h "checking for sys/mount.h... " uncomment "#define HAVE_SYS_MOUNT_H" ) &
 fi
 
 ( config sync "checking for sync()... " uncomment "#define HAVE_SYNC" ) &
@@ -650,9 +679,10 @@ fi
 ( config memccpy "checking for memccpy()... " uncomment "#define HAVE_MEMCCPY" ) &
 ( config seekdir "checking for seekdir()... " uncomment "#define HAVE_SEEKDIR" ) &
 ( config realpath "checking for realpath()... " uncomment "#define HAVE_REALPATH" ) &
-wait
 ( config setreuid "checking for setreuid()... " uncomment "#define HAVE_SETREUID" ) &
+( config fdatasync "checking for fdatasync()... " uncomment "#define HAVE_FDATASYNC" ) &
 ( config sendto_zero "checking for sendto(0.0.0.0)... " uncomment "#define HAVE_SENDTO_ZERO" ) &
+wait
 ( config struct_timezone "checking for struct timezone... " uncomment "#define HAVE_STRUCT_TIMEZONE" ) &
 ( config sa_len "checking for sockaddr::sa_len... " uncomment "#define HAVE_SA_LEN" ) &
 ( config map_shared "checking for mmap(MAP_SHARED)... " uncomment "#define HAVE_MAP_SHARED" ) &
@@ -660,6 +690,8 @@ wait
 ( config clock_settime "checking for clock_settime()... " uncomment "#define HAVE_CLOCK_SETTIME" ) &
 ( config sched_h "checking for sched.h... " uncomment "#define HAVE_SCHED_H" ) &
 ( config pthread_process_shared "checking for PTHREAD_PROCESS_SHARED... " uncomment "#define HAVE_PTHREAD_PROCESS_SHARED" ) &
+( config pthread_setcancelstate "checking for pthread_setcancelstate()... " uncomment "#define HAVE_PTHREAD_SETCANCELSTATE" ) &
+( config sockatmark "checking for sockatmark()... " uncomment "#define HAVE_SOCKATMARK" ) &
 
 wait
 rm -f "${LOCK}"
@@ -705,7 +737,7 @@ HOST_ARCH = ${HOST_ARCH}
 HOST_SYSTEM = ${HOST_SYSTEM}
 CONFIG_HOSTNAME = $(hostname)
 CONFIG_COMMAND = ${CONFIG_COMMAND}
-CONFIG_ARGUMENTS = -DCONFIG_ARGUMENTS="\"$*\""
+CONFIG_ARGUMENTS = -DCONFIG_ARGUMENTS="\"$(echo $* | sed s/\ / /g)\""
 BLINK_UNAME_V = -DBLINK_UNAME_V="\"$(echo ${BLINK_UNAME_V})\""
 ZLIB = ${ZLIB}
 EOF

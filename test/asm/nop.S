@@ -3,7 +3,17 @@
 _start:
 
 //	make -j8 o//blink o//test/asm/nop.elf
-//	o//blink/tui o//test/asm/nop.elf
+//	o//blink/blinkenlights o//test/asm/nop.elf
+
+	nop
+	nopl	(%rax)
+	nop
+	nop
+	nopl	(%rax)
+	nop
+	nopl	(%rax)
+	nop
+	nop
 
 	push	$0
 	mov	%rsp,%rdi

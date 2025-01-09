@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -16,10 +16,14 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
-#include <stdio.h>
-
-#include "blink/buffer.h"
 #include "blink/cga.h"
+#include "blink/bda.h"
+
+#include <stdio.h>
+#include <termios.h>
+
+#include "blink/blinkenlights.h"
+#include "blink/buffer.h"
 #include "blink/macros.h"
 #include "blink/util.h"
 
@@ -32,17 +36,42 @@ size_t FormatCga(u8 bgfg, char buf[11]) {
                  kCgaToAnsi[bgfg & 0x0F]);
 }
 
-void DrawCga(struct Panel *p, u8 v[25][80][2]) {
+#ifdef IUTF8
+#define CURSOR L'▂'
+#else
+#define CURSOR '_'
+#endif
+
+void DrawCga(struct Panel *p, u8 *vram) {
+  unsigned y, x, ny, nx, a, ch, attr, curx, cury;
+  u8 *v;
+  wint_t wch;
   char buf[11];
-  unsigned y, x, n, a;
-  n = MIN(25, p->bottom - p->top);
-  for (y = 0; y < n; ++y) {
+  ny = MIN(BdaLines, p->bottom - p->top);
+  nx = BdaCols;
+  curx = BdaCurx;
+  cury = BdaCury;
+  for (y = 0; y < ny; ++y) {
     a = -1;
-    for (x = 0; x < 80; ++x) {
-      if (v[y][x][1] != a) {
-        AppendData(&p->lines[y], buf, FormatCga((a = v[y][x][1]), buf));
+    v = vram + y * nx * 2;
+    for (x = 0; x < nx; ++x) {
+      ch = *v++;
+      attr = *v++;
+      if (!BdaCurhidden && x == curx && y == cury) {
+        if (ch == ' ' || ch == '\0') {
+          wch = CURSOR;
+        } else {
+          wch = GetVidyaByte(ch);
+          attr = (attr & 0xF0) >> 4 | (attr & 0x0F) << 4;
+        }
+        a = -1;
+      } else {
+        wch = GetVidyaByte(ch);
       }
-      AppendWide(&p->lines[y], kCp437[v[y][x][0]]);
+      if (attr != a) {
+        AppendData(&p->lines[y], buf, FormatCga((a = attr), buf));
+      }
+      AppendWide(&p->lines[y], wch);
     }
     AppendStr(&p->lines[y], "\033[0m");
   }

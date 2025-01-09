@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -227,11 +227,14 @@ const char *DisSpecMap0(struct XedDecodedInst *x, char *p) {
     RCASE(0xC5, "lds %Gv Mp");
     RCASE(0xC6, "mov Eb Ib");
     RCASE(0xC7, "mov Evqp Ivds");
+    RCASE(0xC8, "enter >Ib Iw");
     RCASE(0xC9, "leave");
     RCASE(0xCA, "lret Iw");
     RCASE(0xCB, "lret");
     RCASE(0xCC, "int3");
     RCASE(0xCD, "int Ib");
+    RCASE(0xCE, "into");
+    RCASE(0xCF, "iret");
     RCASE(0xD0, "BIT Eb");
     RCASE(0xD1, "BIT Evqp");
     RCASE(0xD2, "BIT Evqp %cl");
@@ -510,8 +513,10 @@ const char *DisSpecMap0(struct XedDecodedInst *x, char *p) {
       switch (ModrmReg(x->op.rde)) {
         RCASE(0, "inc Evqp");
         RCASE(1, "dec Evqp");
-        RCASE(2, "CALL Eq");
-        RCASE(4, "JMP Eq");
+        RCASE(2, "CALL *Eq");
+        RCASE(3, "lcall *Eq");
+        RCASE(4, "JMP *Eq");
+        RCASE(5, "ljmp *Eq");
         RCASE(6, "pushWQ Evq");
       }
       break;
@@ -526,6 +531,7 @@ const char *DisSpecMap1(struct XedDecodedInst *x, char *p) {
     RCASE(0x02, "lar %Gvqp Ev");
     RCASE(0x03, "lsl %Gvqp Ev");
     RCASE(0x05, "syscall");
+    RCASE(0x06, "clts");
     RCASE(0x09, "wbinvd");
     RCASE(0x0B, "ud2");
     RCASE(0x20, "mov %Hd %Cd");
@@ -586,7 +592,10 @@ const char *DisSpecMap1(struct XedDecodedInst *x, char *p) {
     RCASE(0xAF, "imul %Gvqp Evqp");
     RCASE(0xB0, "cmpxchg Eb %Gb");
     RCASE(0xB1, "cmpxchg Evqp %Gvqp");
+    RCASE(0xB2, "lss %Gv Mp");
     RCASE(0xB3, "btr Evqp %Gvqp");
+    RCASE(0xB4, "lfs %Gv Mp");
+    RCASE(0xB5, "lgs %Gv Mp");
     RCASE(0xB6, "movzbWLQ %Gvqp Eb");
     RCASE(0xB7, "movzwWLQ %Gvqp Ew");
     RCASE(0xB9, "ud %Gvqp Evqp");
@@ -640,7 +649,6 @@ const char *DisSpecMap1(struct XedDecodedInst *x, char *p) {
     RCASE(0xFC, DisOpPqQqVdqWdq(x, p, "paddb"));
     RCASE(0xFD, DisOpPqQqVdqWdq(x, p, "paddw"));
     RCASE(0xFE, DisOpPqQqVdqWdq(x, p, "paddd"));
-    RCASE(0xFF, "ud0 %Gvqp Evqp");
     case 0x0D:
     case 0x18:
     case 0x19:
@@ -721,6 +729,23 @@ const char *DisSpecMap1(struct XedDecodedInst *x, char *p) {
         return "lzcnt %Gvqp Evqp";
       } else {
         return "bsr %Gvqp Evqp";
+      }
+    case 0x00:
+      switch (ModrmReg(x->op.rde)) {
+        case 0:
+          return "sldt Ew";
+        case 1:
+          return "str Ew";
+        case 2:
+          return "lldt Ew";
+        case 3:
+          return "ltr Ew";
+        case 4:
+          return "verr Ew";
+        case 5:
+          return "verw Ew";
+        default:
+          return UNKNOWN;
       }
     case 0x01:
       switch (ModrmReg(x->op.rde)) {
@@ -1151,6 +1176,20 @@ const char *DisSpecMap1(struct XedDecodedInst *x, char *p) {
         return "cvtdq2pd %Vpd Wdq";
       }
       break;
+    case 0xFF:
+      switch (Rep(x->op.rde) << 9 | ModrmMod(x->op.rde) << 6 |
+              ModrmReg(x->op.rde) << 3 | ModrmRm(x->op.rde)) {
+        case 00067:
+        case 00167:
+        case 00267:
+          return "hvtailcall Ovqp";
+        case 00077:
+        case 00177:
+        case 00277:
+          return "hvcall Ovqp";
+        default:
+          return "ud0 %Gvqp Evqp";
+      }
   }
   return UNKNOWN;
 }

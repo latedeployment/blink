@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -150,6 +150,10 @@ void TerminateSignal(struct Machine *m, int sig, int code) {
   int syssig;
   struct sigaction sa;
   unassert(!IsSignalIgnoredByDefault(sig));
+  KillOtherThreads(m->system);
+#ifdef HAVE_JIT
+  DisableJit(&m->system->jit);  // unmapping exec pages is slow
+#endif
   if (IsSignalSerious(sig)) {
     ERRF("terminating due to %s ("
          "rip=%#" PRIx64 " "
@@ -159,7 +163,6 @@ void TerminateSignal(struct Machine *m, int sig, int code) {
     PrintDiagnostics(m);
   }
   if ((syssig = XlatSignal(sig)) == -1) syssig = SIGKILL;
-  KillOtherThreads(m->system);
   FreeMachine(m);
 #ifdef HAVE_JIT
   ShutdownJit();
@@ -204,20 +207,23 @@ static int Exec(char *execfn, char *prog, char **argv, char **envp) {
   sigset_t oldmask;
   struct Machine *m, *old;
   if ((old = g_machine)) KillOtherThreads(old->system);
-  unassert((g_machine = m = NewMachine(NewSystem(XED_MODE_LONG), 0)));
+  unassert((g_machine = m = NewMachine(NewSystem(XED_MACHINE_MODE_LONG), 0)));
 #ifdef HAVE_JIT
   if (FLAG_nojit) DisableJit(&m->system->jit);
 #endif
   m->system->exec = Exec;
   if (!old) {
     // this is the first time a program is being loaded
-    LoadProgram(m, execfn, prog, argv, envp);
+    LoadProgram(m, execfn, prog, argv, envp, NULL);
     SetupCod(m);
     for (i = 0; i < 10; ++i) {
       AddStdFd(&m->system->fds, i);
     }
     ProgramLimit(m->system, RLIMIT_NOFILE, RLIMIT_NOFILE_LINUX);
   } else {
+#ifdef HAVE_JIT
+    DisableJit(&old->system->jit);  // unmapping exec pages is slow
+#endif
     unassert(!m->sysdepth);
     unassert(!m->pagelocks.i);
     unassert(!FreeVirtual(old->system, -0x800000000000, 0x1000000000000));
@@ -227,7 +233,7 @@ static int Exec(char *execfn, char *prog, char **argv, char **envp) {
       }
     }
     memcpy(m->system->rlim, old->system->rlim, sizeof(old->system->rlim));
-    LoadProgram(m, execfn, prog, argv, envp);
+    LoadProgram(m, execfn, prog, argv, envp, NULL);
     m->system->fds.list = old->system->fds.list;
     old->system->fds.list = 0;
     // releasing the execve() lock must come after unlocking fds
@@ -242,7 +248,7 @@ static int Exec(char *execfn, char *prog, char **argv, char **envp) {
 }
 
 static void Print(int fd, const char *s) {
-  (void)write(fd, s, strlen(s));
+  (void)!write(fd, s, strlen(s));
 }
 
 _Noreturn static void PrintUsage(int argc, char *argv[], int rc, int fd) {
@@ -269,12 +275,6 @@ static void GetOpts(int argc, char *argv[]) {
 #endif
 #if LOG_ENABLED
   FLAG_logpath = getenv("BLINK_LOG_FILENAME");
-#endif
-#ifdef __COSMOPOLITAN__
-  if (IsWindows()) {
-    FLAG_nojit = true;
-    FLAG_nolinear = true;
-  }
 #endif
   while ((opt = GetOpt(argc, argv, OPTS)) != -1) {
     switch (opt) {
@@ -358,6 +358,9 @@ void exit(int status) {
 int main(int argc, char *argv[]) {
   SetupWeb();
   GetStartDir();
+#ifndef NDEBUG
+  AtAbort(PrintStats);
+#endif
 #ifndef DISABLE_STRACE
   setlocale(LC_ALL, "");
 #endif

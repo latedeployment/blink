@@ -1,5 +1,5 @@
 #-*-mode:makefile-gmake;indent-tabs-mode:t;tab-width:8;coding:utf-8-*-┐
-#───vi: set et ft=make ts=8 tw=8 fenc=utf-8 :vi───────────────────────┘
+#── vi: set et ft=make ts=8 tw=8 fenc=utf-8 :vi ──────────────────────┘
 
 .PRECIOUS: third_party/cosmo/%.gz
 third_party/cosmo/%.gz: third_party/cosmo/%.gz.sha256 o/tool/sha256sum
@@ -12,11 +12,14 @@ third_party/cosmo/%.com.dbg: third_party/cosmo/%.com.dbg.gz
 	chmod +x $@
 
 .PRECIOUS: third_party/cosmo/%.com
-third_party/cosmo/%.com: third_party/cosmo/%.com.gz third_party/cosmo/%.com.dbg
+third_party/cosmo/%.com: third_party/cosmo/%.com.gz
 	gzip -dc <$< >$@
 	chmod +x $@
 
-o/$(MODE)/third_party/cosmo/%.com.ok: third_party/cosmo/%.com o/$(MODE)/blink/blink $(VM)
+o/$(MODE)/third_party/cosmo/%.com.ok:								\
+		third_party/cosmo/%.com								\
+		third_party/cosmo/%.com.dbg							\
+		o/$(MODE)/blink/blink $(VM)
 	@mkdir -p $(@D)
 	o/$(MODE)/blink/blink $<
 	@touch $@
@@ -63,6 +66,7 @@ COSMO_TESTS =											\
 	o/$(MODE)/third_party/cosmo/2/rngset_test.com.ok					\
 	o/$(MODE)/third_party/cosmo/2/round_test.com.ok						\
 	o/$(MODE)/third_party/cosmo/2/roundup2log_test.com.ok					\
+	o/$(MODE)/third_party/cosmo/2/roundup2pow_test.com.ok					\
 	o/$(MODE)/third_party/cosmo/2/sad16x8n_test.com.ok					\
 	o/$(MODE)/third_party/cosmo/2/scalevolume_test.com.ok					\
 	o/$(MODE)/third_party/cosmo/2/secp384r1_test.com.ok					\
@@ -181,7 +185,7 @@ COSMO_TESTS =											\
 	o/$(MODE)/third_party/cosmo/2/fgetln_test.com.ok					\
 	o/$(MODE)/third_party/cosmo/2/getcontext_test.com.ok					\
 	o/$(MODE)/third_party/cosmo/2/getenv_test.com.ok					\
-	o/$(MODE)/third_party/cosmo/3/ftruncate_test.com.ok					\
+	o/$(MODE)/third_party/cosmo/8/ftruncate_test.com.ok					\
 	o/$(MODE)/third_party/cosmo/2/tmpfile_test.com.ok					\
 	o/$(MODE)/third_party/cosmo/2/select_test.com.ok					\
 	o/$(MODE)/third_party/cosmo/7/utimensat_test.com.ok					\

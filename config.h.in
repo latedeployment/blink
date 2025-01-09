@@ -15,6 +15,7 @@
 // #define DISABLE_METAL
 // #define DISABLE_MMX
 // #define DISABLE_BCD
+// #define DISABLE_ROM
 // #define DISABLE_BMI2
 
 // #define HAVE_FORK
@@ -26,6 +27,7 @@
 // #define HAVE_INT128
 // #define HAVE_SA_LEN
 // #define HAVE_PREADV
+// #define HAVE_MKFIFO
 // #define HAVE_WCWIDTH
 // #define HAVE_SYSINFO
 // #define HAVE_FEXECVE
@@ -35,6 +37,7 @@
 // #define HAVE_MKFIFOAT
 // #define HAVE_REALPATH
 // #define HAVE_SETREUID
+// #define HAVE_FDATASYNC
 // #define HAVE_STRCHRNUL
 // #define HAVE_VASPRINTF
 // #define HAVE_SETRESUID
@@ -61,5 +64,8 @@
 // #define HAVE_STRUCT_TIMEZONE
 // #define HAVE_SCHED_GETAFFINITY
 // #define HAVE_PTHREAD_PROCESS_SHARED
+// #define HAVE_SYS_MOUNT_H
+// #define HAVE_PTHREAD_SETCANCELSTATE
+// #define HAVE_SOCKATMARK
 
 #endif /* BLINK_CONFIG_H_ */

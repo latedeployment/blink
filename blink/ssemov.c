@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -18,6 +18,7 @@
 ╚─────────────────────────────────────────────────────────────────────────────*/
 #include <string.h>
 
+#include "blink/biosrom.h"
 #include "blink/builtin.h"
 #include "blink/endian.h"
 #include "blink/intrin.h"
@@ -99,8 +100,12 @@ static void MovdqaVdqWdq(P) {
 }
 
 static void MovdqaWdqVdq(P) {
+  u8 *dst;
   IGNORE_RACES_START();
-  memcpy(GetXmmAddress(A), XmmRexrReg(m, rde), 16);
+  dst = GetXmmAddress(A);
+  if (!IsRomAddress(m, dst)) {
+    memcpy(dst, XmmRexrReg(m, rde), 16);
+  }
   IGNORE_RACES_END();
   if (IsMakingPath(m)) {
     Jitter(A, "z4A"    // 128-bit GetReg

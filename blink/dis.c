@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -16,13 +16,14 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
+#include "blink/dis.h"
+
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "blink/assert.h"
 #include "blink/debug.h"
-#include "blink/dis.h"
 #include "blink/endian.h"
 #include "blink/high.h"
 #include "blink/log.h"
@@ -148,7 +149,7 @@ static char *DisLineCode(struct Dis *d, char *p, int err) {
 #ifdef HAVE_JIT
   if (d->m && !IsJitDisabled(&d->m->system->jit)) {
     uintptr_t hook;
-    if ((hook = GetJitHook(&d->m->system->jit, d->addr, 0))) {
+    if ((hook = GetJitHook(&d->m->system->jit, d->addr))) {
       if (hook == (uintptr_t)JitlessDispatch) {
         *p++ = 'S';  // staging hook
       } else {
@@ -228,20 +229,20 @@ static long DisAppendOpLines(struct Dis *d, struct Machine *m, i64 addr) {
     }
   }
   n = MAX(1, MIN(15, n));
-  if (!(r = LookupAddress(m, addr))) return -1;
+  if (!(r = SpyAddress(m, addr))) return -1;
   k = 0x1000 - (addr & 0xfff);
   if (n <= k) {
     p = (u8 *)r;
   } else {
     p = b;
     memcpy(b, r, k);
-    if ((r = LookupAddress(m, addr + k))) {
+    if ((r = SpyAddress(m, addr + k))) {
       memcpy(b + k, r, n - k);
     } else {
       n = k;
     }
   }
-  DecodeInstruction(d->xedd, p, n, m->mode);
+  DecodeInstruction(d->xedd, p, n, m->mode.omode);
   n = d->xedd->length;
   op.addr = addr;
   op.size = n;

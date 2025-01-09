@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -16,6 +16,8 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
+#include "blink/map.h"
+
 #include <errno.h>
 #include <inttypes.h>
 #include <limits.h>
@@ -29,7 +31,6 @@
 #include "blink/debug.h"
 #include "blink/log.h"
 #include "blink/macros.h"
-#include "blink/map.h"
 #include "blink/tunables.h"
 #include "blink/types.h"
 #include "blink/util.h"
@@ -42,7 +43,11 @@ static long GetSystemPageSize(void) {
   return 4096;
 #else
   long z;
+#ifdef _SC_GRANSIZE
+  unassert((z = sysconf(_SC_GRANSIZE)) > 0);
+#else
   unassert((z = sysconf(_SC_PAGESIZE)) > 0);
+#endif
   unassert(IS2POW(z));
   return MAX(4096, z);
 #endif
@@ -94,12 +99,19 @@ static void *PortableMmap(void *addr,     //
 }
 
 static int GetBitsInAddressSpace(void) {
+#ifdef __EMSCRIPTEN__
+  return 32;
+#else
   int i;
   void *ptr;
   uint64_t want;
   for (i = 16; i < 40; ++i) {
     want = UINT64_C(0x8123000000000000) >> i;
     if (want > UINTPTR_MAX) continue;
+    if (Msync((void *)(uintptr_t)want, 1, MS_ASYNC, "vabits") == 0 ||
+        errno == EBUSY) {
+      return 64 - i;
+    }
     ptr = PortableMmap((void *)(uintptr_t)want, 1, PROT_READ,
                        MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS_, -1, 0);
     if (ptr != MAP_FAILED) {
@@ -108,6 +120,7 @@ static int GetBitsInAddressSpace(void) {
     }
   }
   Abort();
+#endif
 }
 
 static u64 GetVirtualAddressSpace(int vabits, long pagesize) {

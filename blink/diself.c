@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -49,7 +49,7 @@ static void DisLoadElfLoads(struct Dis *d, Elf64_Ehdr_ *ehdr, size_t esize,
   long i;
   Elf64_Phdr_ *phdr;
   for (i = 0; i < Read16(ehdr->phnum); ++i) {
-    phdr = GetElfSegmentHeaderAddress(ehdr, esize, i);
+    phdr = GetElfProgramHeaderAddress(ehdr, esize, i);
     if (Read32(phdr->type) != PT_LOAD_) continue;
     if (d->loads.i == d->loads.n) {
       d->loads.n += 2;
@@ -78,7 +78,7 @@ static void DisLoadElfSyms(struct Dis *d, Elf64_Ehdr_ *ehdr, size_t esize,
       for (i = 0; i < n; ++i) {
         if (ELF64_ST_TYPE_(st[i].info) == STT_SECTION_ ||
             ELF64_ST_TYPE_(st[i].info) == STT_FILE_ || !Read32(st[i].name) ||
-            startswith(stab + Read32(st[i].name), "v_") ||
+            StartsWith(stab + Read32(st[i].name), "v_") ||
             !(0 <= Read32(st[i].name) && Read32(st[i].name) < stablen) ||
             !Read64(st[i].value) ||
             !(-0x800000000000 <= (i64)Read64(st[i].value) &&

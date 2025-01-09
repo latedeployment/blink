@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -32,7 +32,7 @@ static void StoreDescriptorTable(P, u16 limit, u64 base) {
   l = ComputeAddress(A);
   if (l + 10 <= kRealSize) {
     Write16(m->system->real + l, limit);
-    if (m->mode == XED_MODE_LONG) {
+    if (Mode(rde) == XED_MODE_LONG) {
       Write64(m->system->real + l + 2, base);
       SetWriteAddr(m, l, 10);
     } else {
@@ -56,7 +56,7 @@ static void LoadDescriptorTable(P, u16 *out_limit, u64 *out_base) {
     //   loaded."
     // - "In 64-bit mode, the instruction’s operand size is fixed at 8 + 2
     //   bytes (an 8-byte base and a 2-byte limit)."
-    if (m->mode == XED_MODE_LONG) {
+    if (Mode(rde) == XED_MODE_LONG) {
       base = Read64(m->system->real + l + 2);
       SetReadAddr(m, l, 10);
     } else if (!Osz(rde)) {
@@ -116,7 +116,7 @@ static void InvlpgM(P) {
   // if (Cpl(m)) OpUdImpl(m);
   as = LoadEffectiveAddress(A);
   virt = as.seg + as.addr;
-  if (m->mode == XED_MODE_LONG &&
+  if (Mode(rde) == XED_MODE_LONG &&
       !(-0x800000000000 <= virt && virt < 0x800000000000)) {
     // In 64-bit mode, if the memory address is in non-canonical form,
     // then INVLPG is the same as a NOP. -Quoth Intel §invlpg
@@ -134,16 +134,21 @@ static void Smsw(P, bool ismem) {
   if (ismem) {
     Store16(GetModrmRegisterWordPointerWrite2(A), m->system->cr0);
   } else if (Rexw(rde)) {
-    Put64(RegRexrReg(m, rde), m->system->cr0);
+    Put64(RegRexbRm(m, rde), m->system->cr0);
   } else if (!Osz(rde)) {
-    Put64(RegRexrReg(m, rde), m->system->cr0 & 0xffffffff);
+    Put64(RegRexbRm(m, rde), m->system->cr0 & 0xffffffff);
   } else {
-    Put16(RegRexrReg(m, rde), m->system->cr0);
+    Put16(RegRexbRm(m, rde), m->system->cr0);
   }
 }
 
 static void Lmsw(P) {
-  m->system->cr0 = Read16(GetModrmRegisterWordPointerRead2(A));
+  // Intel V2A § 3.2:  "Only the low-order 4 bits of the source operand
+  // (which contains the PE, MP, EM, and TS flags) are loaded into CR0.
+  // The PG, CD, NW, AM, WP, NE, and ET flags of CR0 are not affected.
+  // The operand-size attribute has no effect on this instruction."
+  m->system->cr0 = (m->system->cr0 & ~(u64)0xf) |
+                   (Read16(GetModrmRegisterWordPointerRead2(A)) & 0xf);
 }
 
 void Op101(P) {

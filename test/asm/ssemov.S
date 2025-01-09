@@ -4,7 +4,8 @@ _start:	mov	$5,%r15
 "test jit too":
 
 //	sse moves
-//	make -j8 o//blink o//test/asm/ssemov.elf && o//blink/tui o//test/asm/ssemov.elf
+//	make -j8 o//blink o//test/asm/ssemov.elf
+//	o//blink/blinkenlights o//test/asm/ssemov.elf
 
 	.test	"sse mov unaligned"
 	and	$-16,%rsp
@@ -16,8 +17,10 @@ _start:	mov	$5,%r15
 	mov	8(%rsp),%rdx
 	mov	$0x1111111111111111,%rcx
 	cmp	%rcx,%rax
+	.e
 	mov	$0x2222222222222222,%rcx
 	cmp	%rcx,%rdx
+	.e
 
 	.test	"sse mov aligned"
 	and	$-16,%rsp
@@ -29,8 +32,10 @@ _start:	mov	$5,%r15
 	mov	8(%rsp),%rdx
 	mov	$0x1111111111111111,%rcx
 	cmp	%rcx,%rax
+	.e
 	mov	$0x2222222222222222,%rcx
 	cmp	%rcx,%rdx
+	.e
 
 	.test	"sse mov unaligned #2"
 	and	$-16,%rsp
@@ -42,8 +47,10 @@ _start:	mov	$5,%r15
 	mov	8(%rsp),%rdx
 	mov	$0x1111111111111111,%rcx
 	cmp	%rcx,%rax
+	.e
 	mov	$0x2222222222222222,%rcx
 	cmp	%rcx,%rdx
+	.e
 
 	sub	$1,%r15
 	jnz	"test jit too"

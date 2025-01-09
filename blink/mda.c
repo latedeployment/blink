@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -16,9 +16,12 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
+#include "blink/mda.h"
+
+#include "blink/bda.h"
+#include "blink/blinkenlights.h"
 #include "blink/buffer.h"
 #include "blink/macros.h"
-#include "blink/mda.h"
 #include "blink/util.h"
 
 #define kBlink     1
@@ -26,6 +29,8 @@
 #define kUnderline 4
 #define kBold      8
 #define kReverse   16
+
+#define CURSOR '_'
 
 /**
  * Decodes Monochrome Display Adapter attributes.
@@ -43,13 +48,28 @@ static u8 DecodeMdaAttributes(i8 a) {
   return r;
 }
 
-void DrawMda(struct Panel *p, u8 v[25][80][2]) {
-  unsigned y, x, n, a, b;
+void DrawMda(struct Panel *p, u8 v[25][80][2], int curx, int cury) {
+  wint_t wch = 0;
+  unsigned y, x, n, a, b, ch, attr;
   n = MIN(25, p->bottom - p->top);
   for (y = 0; y < n; ++y) {
     a = -1;
     for (x = 0; x < 80; ++x) {
-      b = DecodeMdaAttributes(v[y][x][1]);
+      ch = v[y][x][0];
+      attr = v[y][x][1];
+      if (!BdaCurhidden && x == curx && y == cury) {
+        if (ch == ' ' || ch == '\0') {
+          ch = CURSOR;
+          attr = 0x07;
+        } else {
+          wch = GetVidyaByte(ch);
+          attr = 0x70;
+        }
+        a = -1;
+      } else {
+        wch = GetVidyaByte(ch);
+      }
+      b = DecodeMdaAttributes(attr);
       if (a != b) {
         a = b;
         AppendStr(&p->lines[y], "\033[0");
@@ -59,11 +79,7 @@ void DrawMda(struct Panel *p, u8 v[25][80][2]) {
         if (a & kReverse) AppendStr(&p->lines[y], ";7");
         AppendChar(&p->lines[y], 'm');
       }
-      if (a) {
-        AppendWide(&p->lines[y], kCp437[v[y][x][0]]);
-      } else {
-        AppendChar(&p->lines[y], ' ');
-      }
+      AppendWide(&p->lines[y], wch);
     }
   }
 }

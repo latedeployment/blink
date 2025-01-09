@@ -15,14 +15,11 @@
 #define kJitAlign        16
 #define kJitJumpTries    16
 #define kJitBlockSize    262144
+#define kJitMemorySize   32505856
 #define kJitRetireQueue  (int)(kJitMemorySize / kJitBlockSize * .10)
+#define kJitSlabInts     (65536 / sizeof(struct JitInts))
 #define kJitInitialHooks 16384
-
-#ifdef __x86_64__
-#define kJitMemorySize 130023424
-#else
-#define kJitMemorySize 32505856
-#endif
+#define kJitInitialEdges 4096
 
 #ifdef __x86_64__
 #define kJitRes0 kAmdAx
@@ -87,22 +84,33 @@
 #endif
 
 #ifdef __aarch64__
-#define kArmJmp      0x14000000u  // B
-#define kArmCall     0x94000000u  // BL
-#define kArmRet      0xd65f03c0u  // RET
-#define kArmMovNex   0xf2800000u  // sets sub-word of register to immediate
-#define kArmMovZex   0xd2800000u  // load immediate into reg w/ zero-extend
-#define kArmMovSex   0x92800000u  // load 1's complement imm w/ sign-extend
-#define kArmDispMin  -33554432    // can jump -2**25 ints backward
-#define kArmDispMax  +33554431    // can jump +2**25-1 ints forward
-#define kArmDispMask 0x03ffffffu  // mask of branch displacement
-#define kArmRegOff   0            // bit offset of destination register
-#define kArmRegMask  0x0000001fu  // mask of destination register
-#define kArmImmOff   5            // bit offset of mov immediate value
-#define kArmImmMask  0x001fffe0u  // bit offset of mov immediate value
-#define kArmImmMax   0xffffu      // maximum immediate value per instruction
-#define kArmIdxOff   21           // bit offset of u16[4] sub-word index
-#define kArmIdxMask  0x00600000u  // mask of u16[4] sub-word index
+#define kArmJmp         0x14000000u  // B
+#define kArmCall        0x94000000u  // BL
+#define kArmRet         0xd65f03c0u  // RET
+#define kArmMovNex      0xf2800000u  // sets sub-word of register to immediate
+#define kArmMovZex      0xd2800000u  // load immediate into reg w/ zero-extend
+#define kArmMovSex      0x92800000u  // load 1's complement imm w/ sign-extend
+#define kArmAdr         0x10000000u  // form PC-relative byte address
+#define kArmAdrp        0x90000000u  // form PC-relative page address
+#define kArmLdrPc       0x18000000u  // load PC-relative memory into register
+                                     // (general or SIMD)
+#define kArmLdrswPc     0x98000000u  // load PC-relative short w/ sign-extend
+#define kArmPrfmPc      0xd8000000u  // prefetch PC-relative memory
+#define kArmDispMin     -33554432    // can jump -2**25 ints backward
+#define kArmDispMax     +33554431    // can jump +2**25-1 ints forward
+#define kArmDispMask    0x03ffffffu  // mask of branch displacement
+#define kArmRegOff      0            // bit offset of destination register
+#define kArmRegMask     0x0000001fu  // mask of destination register
+#define kArmImmOff      5            // bit offset of mov immediate value
+#define kArmImmMask     0x001fffe0u  // bit offset of mov immediate value
+#define kArmImmMax      0xffffu      // maximum immediate value per instruction
+#define kArmIdxOff      21           // bit offset of u16[4] sub-word index
+#define kArmIdxMask     0x00600000u  // mask of u16[4] sub-word index
+#define kArmAdrMask     0x9f000000u  // mask of ADR opcode
+#define kArmAdrpMask    0x9f000000u  // mask of ADRP opcode
+#define kArmLdrPcMask   0xbb000000u  // mask of PC-relative LDR opcodes
+#define kArmLdrswPcMask 0xff000000u  // mask of PC-relative LDRSW opcode
+#define kArmPrfmPcMask  0xff000000u  // mask of PC-relative PRFM opcode
 #endif
 
 #define JITJUMP_CONTAINER(e)   DLL_CONTAINER(struct JitJump, elem, e)
@@ -111,12 +119,37 @@
 #define JITBLOCK_CONTAINER(e)  DLL_CONTAINER(struct JitBlock, elem, e)
 #define JITFREED_CONTAINER(e)  DLL_CONTAINER(struct JitFreed, elem, e)
 #define AGEDBLOCK_CONTAINER(e) DLL_CONTAINER(struct JitBlock, aged, e)
+#define JIASLAB_CONTAINER(e)   DLL_CONTAINER(struct JitIntsSlab, elem, e)
+
+struct JitInts {
+  int i, n;
+  i64 *p, m[2];
+};
+
+struct JitIntsSlab {
+  int i;
+  struct Dll elem;
+  struct JitInts p[kJitSlabInts];
+};
+
+struct JitIntsAllocator {
+  int i, n;
+  struct JitInts **p;
+  struct Dll *slabs;
+};
+
+struct JitEdges {
+  int i, n;
+  i64 *src;
+  struct JitInts **dst;
+  struct JitIntsAllocator jia;
+};
 
 struct JitJump {
   u8 *code;
   u64 virt;
-  long tries;
-  long addend;
+  int tries;
+  int addend;
   struct Dll elem;
 };
 
@@ -140,32 +173,15 @@ struct JitFreeds {
   struct Dll *f;
 };
 
-struct JitBlockPages {
-  int i, n;
-  i64 *p;
-};
-
-struct JitPageEdge {
-  short src;
-  short dst;
-};
-
-struct JitPageEdges {
-  int i, n;
-  struct JitPageEdge *p;
-};
-
 struct JitPage {
   i64 page;
   u64 bitset;
-  struct JitPageEdges edges;
   struct Dll elem;
 };
 
 struct JitBlock {
   u8 *addr;
   i64 virt;
-  long cod;
   long start;
   long index;
   long committed;
@@ -177,7 +193,7 @@ struct JitBlock {
   struct Dll aged;
   struct Dll *jumps;
   struct Dll *staged;
-  struct JitBlockPages pages;
+  struct Dll *freejumps;
 };
 
 struct JitHooks {
@@ -192,10 +208,13 @@ struct Jit {
   bool threaded;
   _Atomic(bool) disabled;
   struct JitHooks hooks;
+  struct JitEdges edges;
+  struct JitEdges redges;
   struct JitFreeds freeds;
   struct Dll *agedblocks;
   struct Dll *blocks;
   struct Dll *jumps;
+  struct Dll *freejumps;
   struct Dll *pages;
   pthread_mutex_t_ lock;
   _Alignas(kSemSize) _Atomic(unsigned) keygen;
@@ -220,6 +239,7 @@ struct JitBlock *StartJit(struct Jit *, i64);
 bool AlignJit(struct JitBlock *, int, int);
 bool AppendJitRet(struct JitBlock *);
 bool AppendJitNop(struct JitBlock *);
+bool AppendJitPause(struct JitBlock *);
 bool AppendJitTrap(struct JitBlock *);
 bool AppendJitJump(struct JitBlock *, void *);
 bool AppendJitCall(struct JitBlock *, void *);
@@ -228,7 +248,7 @@ bool AppendJitMovReg(struct JitBlock *, int, int);
 bool FinishJit(struct Jit *, struct JitBlock *);
 bool RecordJitJump(struct JitBlock *, u64, int);
 bool RecordJitEdge(struct Jit *, i64, i64);
-uintptr_t GetJitHook(struct Jit *, u64, uintptr_t);
+uintptr_t GetJitHook(struct Jit *, u64);
 int ResetJitPage(struct Jit *, i64);
 
 int CommitJit_(struct Jit *, struct JitBlock *);

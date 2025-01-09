@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -38,7 +38,7 @@
 #define INTERESTING_FLAGS (PAGE_U | PAGE_RW | PAGE_XD | PAGE_FILE)
 
 #define BYTES       16384
-#define APPEND(...) u->o += snprintf(u->b + u->o, BYTES - u->o, __VA_ARGS__)
+#define APPEND(...) u->o += snprintf(u->b + u->o, u->o > BYTES ? 0 : BYTES - u->o, __VA_ARGS__)
 
 struct MapMaker {
   bool t;
@@ -214,7 +214,7 @@ char *FormatPml4t(struct Machine *m) {
   struct MapMaker u = {.b = b};
   u16 range[][2] = {{256, 512}, {0, 256}};
   b[0] = 0;
-  if (m->mode != XED_MODE_LONG) return b;
+  if (m->mode.omode != XED_MODE_LONG) return b;
   unassert(m->system->cr3);
   pd[0] = GetPt(m, m->system->cr3, true);
   for (i = 0; i < ARRAYLEN(range); ++i) {

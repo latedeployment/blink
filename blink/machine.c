@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -16,6 +16,8 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
+#include "blink/machine.h"
+
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
@@ -25,6 +27,7 @@
 #include "blink/alu.h"
 #include "blink/assert.h"
 #include "blink/atomic.h"
+#include "blink/biosrom.h"
 #include "blink/bitscan.h"
 #include "blink/builtin.h"
 #include "blink/bus.h"
@@ -37,9 +40,9 @@
 #include "blink/jit.h"
 #include "blink/likely.h"
 #include "blink/log.h"
-#include "blink/machine.h"
 #include "blink/macros.h"
 #include "blink/map.h"
+#include "blink/modrm.h"
 #include "blink/random.h"
 #include "blink/signal.h"
 #include "blink/sse.h"
@@ -213,7 +216,7 @@ static relegated void OpLsl(P) {
   }
 }
 
-void SetMachineMode(struct Machine *m, int mode) {
+void SetMachineMode(struct Machine *m, struct XedMachineMode mode) {
   m->mode = mode;
   m->system->mode = mode;
 }
@@ -234,10 +237,59 @@ static void OpXchgZvqp(P) {
   WriteRegister(rde, RegRexbSrm(m, rde), x);
 }
 
+static void OpCmpxchg8b(P) {
+  uint8_t *p;
+  uint32_t d, a;
+  p = GetModrmRegisterXmmPointerRead8(A);
+  if (Lock(rde)) LockBus(p);
+  a = Read32(p + 0);
+  d = Read32(p + 4);
+  if (a == Read32(m->ax) && d == Read32(m->dx)) {
+    m->flags = SetFlag(m->flags, FLAGS_ZF, true);
+    memcpy(p + 0, m->bx, 4);
+    memcpy(p + 4, m->cx, 4);
+  } else {
+    m->flags = SetFlag(m->flags, FLAGS_ZF, false);
+    Write32(m->ax, a);
+    Write32(m->dx, d);
+  }
+  if (Lock(rde)) UnlockBus(p);
+}
+
+static void OpCmpxchg16b(P) {
+  uint8_t *p;
+  uint64_t d, a;
+  p = GetModrmRegisterXmmPointerRead16(A);
+  if (Lock(rde)) LockBus(p);
+  a = Read64(p + 0);
+  d = Read64(p + 8);
+  if (a == Read64(m->ax) && d == Read64(m->dx)) {
+    m->flags = SetFlag(m->flags, FLAGS_ZF, true);
+    memcpy(p + 0, m->bx, 8);
+    memcpy(p + 8, m->cx, 8);
+  } else {
+    m->flags = SetFlag(m->flags, FLAGS_ZF, false);
+    Write64(m->ax, a);
+    Write64(m->dx, d);
+  }
+  if (Lock(rde)) UnlockBus(p);
+}
+
 static void Op1c7(P) {
   bool ismem;
   ismem = !IsModrmRegister(rde);
   switch (ModrmReg(rde)) {
+    case 1:
+      if (ismem) {
+        if (Rexw(rde)) {
+          OpCmpxchg16b(A);
+        } else {
+          OpCmpxchg8b(A);
+        }
+      } else {
+        OpUdImpl(m);
+      }
+      break;
     case 6:
       if (!ismem) {
         OpRdrand(A);
@@ -382,18 +434,19 @@ void Connect(P, u64 pc, bool avoid_cycles) {
 #ifdef HAVE_JIT
   void *jump;
   uintptr_t f;
-  STATISTIC(++path_connections);
+  STATISTIC(++path_connected_total);
   // 1. cyclic paths can block asynchronous sigs & deadlock exit
   // 2. we don't want to stitch together paths on separate pages
-  if ((pc & -4096) == (m->path.start & -4096) &&
-      (!avoid_cycles || RecordJitEdge(&m->system->jit, m->path.start, pc))) {
+  if ((!avoid_cycles && m->path.start == pc) ||
+      RecordJitEdge(&m->system->jit, m->path.start, pc)) {
     // is a preexisting jit path installed at destination?
-    f = GetJitHook(&m->system->jit, pc, (uintptr_t)GeneralDispatch);
-    if (f != (uintptr_t)JitlessDispatch && f != (uintptr_t)GeneralDispatch) {
+    if ((f = GetJitHook(&m->system->jit, pc)) &&
+        f != (uintptr_t)JitlessDispatch) {
       // tail call into the other generated jit path function
       jump = (u8 *)f + GetPrologueSize();
-      STATISTIC(++path_connected);
+      STATISTIC(++path_connected_directly);
     } else {
+      STATISTIC(++path_connected_lazily);
       // generate assembly to drop back into main interpreter
       // then apply an smc fixup later on, if dest is created
       if (!FLAG_noconnect) {
@@ -403,6 +456,7 @@ void Connect(P, u64 pc, bool avoid_cycles) {
     }
   } else {
     // generate assembly to drop back into main interpreter
+    STATISTIC(++path_connected_interpreter);
     jump = (void *)m->system->ender;
   }
   AppendJitJump(m->path.jb, jump);
@@ -418,9 +472,7 @@ static void AluRo(P, const aluop_f ops[4], const aluop_f fops[4]) {
     LoadAluArgs(A);
     switch (GetNeededFlags(m, m->ip, CF | ZF | SF | OF | AF | PF)) {
       case 0:
-      case CF:
-      case ZF:
-      case CF | ZF:
+      CASE_ALU_FAST:
         STATISTIC(++alu_simplified);
         Jitter(A,
                "q"   // arg0 = sav0 (machine)
@@ -477,9 +529,7 @@ static void OpAluFlip(P) {
                "r0C",  // PutReg(RexrReg, res0)
                kJustAlu[(Opcode(rde) & 070) >> 3]);
         break;
-      case CF:
-      case ZF:
-      case CF | ZF:
+      CASE_ALU_FAST:
         STATISTIC(++alu_simplified);
         Jitter(A,
                "q"     // arg0 = sav0 (machine)
@@ -507,9 +557,7 @@ static void OpAluFlipCmp(P) {
     LoadAluFlipArgs(A);
     switch (GetNeededFlags(m, m->ip, CF | ZF | SF | OF | AF | PF)) {
       case 0:
-      case CF:
-      case ZF:
-      case CF | ZF:
+      CASE_ALU_FAST:
         STATISTIC(++alu_simplified);
         Jitter(A,
                "q"   // arg0 = sav0 (machine)
@@ -533,9 +581,7 @@ static void OpAluAxImm(P) {
   if (IsMakingPath(m)) {
     switch (GetNeededFlags(m, m->ip, CF | ZF | SF | OF | AF | PF)) {
       case 0:
-      case CF:
-      case ZF:
-      case CF | ZF:
+      CASE_ALU_FAST:
         STATISTIC(++alu_simplified);
         Jitter(A,
                "G"      // res0 = %ax
@@ -566,9 +612,7 @@ static void OpRoAxImm(P, const aluop_f ops[4], const aluop_f fops[4]) {
     STATISTIC(++alu_ops);
     switch (GetNeededFlags(m, m->ip, CF | ZF | SF | OF | AF | PF)) {
       case 0:
-      case CF:
-      case ZF:
-      case CF | ZF:
+      CASE_ALU_FAST:
         STATISTIC(++alu_simplified);
         Jitter(A,
                "G"      // r0 = GetReg(AX)
@@ -751,17 +795,102 @@ static void OpPushImm(P) {
   Push(A, uimm0);
 }
 
+static void GenInterrupt(P, u8 trapno) {
+#ifdef DISABLE_METAL
+  HaltMachine(m, trapno);
+#else
+  u16 offset;
+  struct System *s;
+  switch (m->mode.genmode) {
+    default:
+      HaltMachine(m, trapno);
+      break;
+    case XED_GEN_MODE_REAL:
+      offset = (u16)trapno * 4;
+      s = m->system;
+      if (offset + 3 > s->idt_limit) {
+        ThrowProtectionFault(m);
+      } else if (!Osz(rde) || Asz(rde)) {
+        OpUdImpl(m);
+      } else {
+        u8 *pfp = ReserveAddress(m, s->idt_base + offset, 4, false), *pisr;
+        u32 fp, isrinsn;
+        u16 isrseg, isroff;
+        bool optim = false;
+        fp = Load32(pfp);
+        isrseg = (u16)(fp >> 16);
+        isroff = (u16)fp;
+        Push(A, ExportFlags(m->flags));
+        Push(A, m->cs.sel);
+        Push(A, m->ip);
+        // optimize for cases where ISR is simply a `hvtailcall` & a few
+        // other conditions are met; this bypasses the usual instruction
+        // decoding so it should be done with care to preserve semantics
+        if (trapno < 0x80 && isrseg == kBiosSeg) {
+          pisr = s->real + kBiosBase + isroff;
+          if (Read8(pisr) == 0x0F) {
+            isrinsn = Load32(pisr);
+            if (isrinsn == ((u32)0x0F | (u32)0xFF << 8 | (u32)0167 << 16 |
+                            (u32)trapno << 24)) {
+              optim = true;
+            }
+          }
+        }
+        if (optim) {
+          u64 sp = Get16(m->sp);
+          Put16(m->sp, sp + 6);
+          HaltMachine(m, trapno);
+        } else {
+          m->flags = SetFlag(m->flags, FLAGS_IF, false);
+          m->flags = SetFlag(m->flags, FLAGS_TF, false);
+          m->flags = SetFlag(m->flags, FLAGS_AC, false);
+          LongBranch(A, isrseg, isroff);
+        }
+      }
+  }
+#endif
+}
+
 static void OpInterruptImm(P) {
-  HaltMachine(m, uimm0);
+  GenInterrupt(A, uimm0);
 }
 
 static void OpInterrupt1(P) {
-  HaltMachine(m, 1);
+  GenInterrupt(A, 1);
 }
 
 static void OpInterrupt3(P) {
-  HaltMachine(m, 3);
+  GenInterrupt(A, 3);
 }
+
+#ifndef DISABLE_METAL
+static void OpInto(P) {
+  if (Mode(rde) != XED_MODE_LONG) {
+    if (GetFlag(m->flags, FLAGS_OF)) HaltMachine(m, 4);
+  } else {
+    OpUdImpl(m);
+  }
+}
+
+static void OpIret(P) {
+  if (m->mode.genmode == XED_GEN_MODE_REAL) {
+    OpRetf(A);
+    if (!Osz(rde)) {
+      // Intel V2A § 3.2 says that iretl should only update some parts of
+      // eflags, not all; more precisely:
+      //   "tempEFLAGS ← Pop();
+      //    EFLAGS ← (tempEFLAGS AND 257FD5H) OR (EFLAGS AND 1A0000H);"
+      // it should be OK though to update all the bits in eflags's lower half
+      u32 mask = ID | AC | RF | 0xffff;
+      ImportFlags(m, (m->flags & ~mask) | (Pop(A, 0) & mask));
+    } else {
+      ImportFlags(m, (m->flags & ~0xffff) | Pop(A, 0));
+    }
+  } else {
+    OpUdImpl(m);
+  }
+}
+#endif
 
 void Terminate(P, void uop(struct Machine *, u64)) {
   if (IsMakingPath(m)) {
@@ -812,7 +941,7 @@ static void OpJcc(P) {
     };
 #endif
     AppendJit(m->path.jb, code, sizeof(code));
-    Connect(A, m->ip, false);
+    Connect(A, m->ip, true);
     Jitter(A,
            "a1i"  // arg1 = disp
            "m"    // call micro-op
@@ -1071,13 +1200,18 @@ static void Op0f7(P) {
   kOp0f7[ModrmReg(rde)](A);
 }
 
+#ifdef DISABLE_METAL
+#define OpCallfEq OpUd
+#define OpJmpfEq  OpUd
+#endif
+
 static const nexgen32e_f kOp0ff[] = {
     OpIncEvqp,  //
     OpDecEvqp,  //
     OpCallEq,   //
-    OpUd,       //
+    OpCallfEq,  //
     OpJmpEq,    //
-    OpUd,       //
+    OpJmpfEq,   //
     OpPushEvq,  //
     OpUd,       //
 };
@@ -1287,6 +1421,53 @@ static void OpNopEv(P) {
   }
 }
 
+#ifndef DISABLE_METAL
+static void OpHvcall(P) {
+  HaltMachine(m, disp);
+}
+
+static void OpHvtailcall(P) {
+  OpIret(A);
+  HaltMachine(m, disp);
+}
+
+static void OpUd0GvqpEvqp(P) {
+  if (Cpl(m) == 3) {
+    OpUd(A);
+  } else {
+    // define `hvcall` & `hvtailcall` instructions which trap to our Blink
+    // hypervisor; these are encoded as x86 "invalid opcodes" in 16-bit mode:
+    // - 0f ff 3f         hvcall 0          ud0 (%bx), %di
+    // - 0f ff 7f disp8   hvcall ±disp      ud0 ±disp(%bx), %di
+    // - 0f ff bf disp16  hvcall ±disp      ud0 ±disp(%bx), %di
+    // - 0f ff 37         hvtailcall 0      ud0 (%bx), %si
+    // - 0f ff 77 disp8   hvtailcall ±disp  ud0 ±disp(%bx), %si
+    // - 0f ff b7 disp16  hvtailcall ±disp  ud0 ±disp(%bx), %si
+    //
+    // `hvcall` invokes a "hypervisor trap" with the trap number given by
+    // the displacement value
+    //
+    // `hvtailcall`, when run from within an interrupt service routine, will
+    // return (`iret`) to the ISR's caller & then invoke the numbered trap
+    switch (Rep(rde) << 9 | ModrmMod(rde) << 6 | ModrmReg(rde) << 3 |
+            ModrmRm(rde)) {
+      case 00067:
+      case 00167:
+      case 00267:
+        OpHvtailcall(A);
+        break;
+      case 00077:
+      case 00177:
+      case 00277:
+        OpHvcall(A);
+        break;
+      default:
+        OpUd(A);
+    }
+  }
+}
+#endif
+
 static void OpNop(P) {
   if (Rexb(rde)) {
     OpXchgZvqp(A);
@@ -1304,31 +1485,38 @@ static void OpEmms(P) {
 }
 
 #ifdef DISABLE_METAL
-#define OpCallf     OpUd
-#define OpDecZv     OpUd
-#define OpInAlDx    OpUd
-#define OpInAlImm   OpUd
-#define OpInAxDx    OpUd
-#define OpInAxImm   OpUd
-#define OpIncZv     OpUd
-#define OpJmpf      OpUd
-#define OpLds       OpUd
-#define OpLes       OpUd
-#define OpMovCqRq   OpUd
-#define OpMovEvqpSw OpUd
-#define OpMovRqCq   OpUd
-#define OpMovSwEvqp OpUd
-#define OpOutDxAl   OpUd
-#define OpOutDxAx   OpUd
-#define OpOutImmAl  OpUd
-#define OpOutImmAx  OpUd
-#define OpPopSeg    OpUd
-#define OpPopa      OpUd
-#define OpPushSeg   OpUd
-#define OpPusha     OpUd
-#define OpRdmsr     OpUd
-#define OpRetf      OpUd
-#define OpWrmsr     OpUd
+#define OpCallf       OpUd
+#define OpDecZv       OpUd
+#define OpInAlDx      OpUd
+#define OpInAlImm     OpUd
+#define OpInAxDx      OpUd
+#define OpInAxImm     OpUd
+#define OpIncZv       OpUd
+#define OpJmpf        OpUd
+#define OpLds         OpUd
+#define OpLes         OpUd
+#define OpLfs         OpUd
+#define OpLgs         OpUd
+#define OpLss         OpUd
+#define OpMovCqRq     OpUd
+#define OpMovEvqpSw   OpUd
+#define OpMovRqCq     OpUd
+#define OpMovSwEvqp   OpUd
+#define OpOutDxAl     OpUd
+#define OpOutDxAx     OpUd
+#define OpOutImmAl    OpUd
+#define OpOutImmAx    OpUd
+#define OpPopSeg      OpUd
+#define OpPopa        OpUd
+#define OpPushSeg     OpUd
+#define OpPusha       OpUd
+#define OpClts        OpUd
+#define OpRdmsr       OpUd
+#define OpRetf        OpUd
+#define OpInto        OpUd
+#define OpIret        OpUd
+#define OpWrmsr       OpUd
+#define OpUd0GvqpEvqp OpUd
 #endif
 
 #ifdef DISABLE_X87
@@ -1552,14 +1740,14 @@ static const nexgen32e_f kNexgen32e[] = {
     /*0C5*/ OpLds,                   //
     /*0C6*/ OpMovImm,                // #90   (0.004525%)
     /*0C7*/ OpMovImm,                // #45   (0.161349%)
-    /*0C8*/ OpUd,                    //
+    /*0C8*/ OpEnter,                 //
     /*0C9*/ OpLeave,                 // #116  (0.001237%)
     /*0CA*/ OpRetf,                  //
     /*0CB*/ OpRetf,                  //
     /*0CC*/ OpInterrupt3,            //
     /*0CD*/ OpInterruptImm,          //
-    /*0CE*/ OpUd,                    //
-    /*0CF*/ OpUd,                    //
+    /*0CE*/ OpInto,                  //
+    /*0CF*/ OpIret,                  //
     /*0D0*/ OpBsubi1,                // #212  (0.000021%)
     /*0D1*/ OpBsuwi1,                // #61   (0.016958%)
     /*0D2*/ OpBsubiCl,               //
@@ -1614,7 +1802,7 @@ static const nexgen32e_f kNexgen32e[] = {
     /*103*/ OpLsl,                   //
     /*104*/ OpUd,                    //
     /*105*/ OpSyscall,               // #133  (0.000663%)
-    /*106*/ OpUd,                    //
+    /*106*/ OpClts,                  //
     /*107*/ OpUd,                    //
     /*108*/ OpUd,                    //
     /*109*/ OpWbinvd,                //
@@ -1786,10 +1974,10 @@ static const nexgen32e_f kNexgen32e[] = {
     /*1AF*/ OpImulGvqpEvqp,          // #34   (0.299503%)
     /*1B0*/ OpCmpxchgEbAlGb,         //
     /*1B1*/ OpCmpxchgEvqpRaxGvqp,    // #87   (0.005376%)
-    /*1B2*/ OpUd,                    //
+    /*1B2*/ OpLss,                   //
     /*1B3*/ OpBit,                   // #199  (0.000035%)
-    /*1B4*/ OpUd,                    //
-    /*1B5*/ OpUd,                    //
+    /*1B4*/ OpLfs,                   //
+    /*1B5*/ OpLgs,                   //
     /*1B6*/ OpMovzbGvqpEb,           // #37   (0.296523%)
     /*1B7*/ OpMovzwGvqpEw,           // #137  (0.000433%)
     /*1B8*/ Op1b8,                   //
@@ -1863,7 +2051,7 @@ static const nexgen32e_f kNexgen32e[] = {
     /*1FC*/ OpSsePaddb,              // #233  (0.000005%)
     /*1FD*/ OpSsePaddw,              // #227  (0.000006%)
     /*1FE*/ OpSsePaddd,              // #232  (0.000005%)
-    /*1FF*/ OpUd,                    //
+    /*1FF*/ OpUd0GvqpEvqp,           //
     /*200*/ OpSsePshufb,             // #268  (0.000003%)
     /*201*/ OpSsePhaddw,             // #204  (0.000027%)
     /*202*/ OpSsePhaddd,             // #210  (0.000027%)
@@ -1921,7 +2109,7 @@ void JitlessDispatch(P) {
   m->oplen = 0;
 }
 
-void GeneralDispatch(P) {
+static void GeneralDispatch(P) {
 #ifdef HAVE_JIT
   int opclass;
   uintptr_t jitpc = 0;
@@ -1993,51 +2181,47 @@ void GeneralDispatch(P) {
 #endif
 }
 
-static void ExploreInstruction(struct Machine *m, nexgen32e_f func) {
-#ifdef HAVE_JIT
-  if (func == JitlessDispatch) {
-    JIT_LOGF("abandoning path starting at %" PRIx64
-             " due to running into staged path",
-             m->path.start);
-    AbandonPath(m);
-    COSTLY_STATISTIC(++instructions_dispatched);
-    func(DISPATCH_NOTHING);
-    return;
-  } else if (func != GeneralDispatch &&
-             (m->path.start & -4096) == (m->ip & -4096)) {
-    JIT_LOGF("splicing path starting at %#" PRIx64
-             " into previously created function %p at %#" PRIx64,
-             m->path.start, func, m->ip);
-    STATISTIC(++path_spliced);
-    FlushSkew(DISPATCH_NOTHING);
-    AppendJitSetReg(m->path.jb, kJitArg0, kJitSav0);
-    AppendJitJump(m->path.jb, (u8 *)(uintptr_t)func + GetPrologueSize());
-    FinishPath(m);
-    COSTLY_STATISTIC(++instructions_dispatched);
-    func(DISPATCH_NOTHING);
-    return;
-  } else {
-    GeneralDispatch(DISPATCH_NOTHING);
-  }
-#endif
-}
-
 void ExecuteInstruction(struct Machine *m) {
 #if LOG_CPU
   LogCpu(m);
 #endif
 #ifdef HAVE_JIT
+  u8 *dst;
   nexgen32e_f func;
+  unassert(m->canhalt);
   if (CanJit(m)) {
-    func = (nexgen32e_f)GetJitHook(&m->system->jit, m->ip,
-                                   (uintptr_t)GeneralDispatch);
-    if (!IsMakingPath(m)) {
-      // this increment can cause a >3% overall slowdown
-      COSTLY_STATISTIC(++instructions_dispatched);
-      func(DISPATCH_NOTHING);
-    } else {
-      ExploreInstruction(m, func);
+    if ((func = (nexgen32e_f)GetJitHook(&m->system->jit, m->ip))) {
+      if (!IsMakingPath(m)) {
+        func(DISPATCH_NOTHING);
+        return;
+      } else if (func == JitlessDispatch) {
+        JIT_LOGF("abandoning path starting at %" PRIx64
+                 " due to running into staged path",
+                 m->path.start);
+        AbandonPath(m);
+        func(DISPATCH_NOTHING);
+        return;
+      } else {
+        JIT_LOGF("splicing path starting at %#" PRIx64
+                 " into previously created function %p at %#" PRIx64,
+                 m->path.start, func, m->ip);
+        FlushSkew(DISPATCH_NOTHING);
+        AppendJitSetReg(m->path.jb, kJitArg0, kJitSav0);
+        STATISTIC(++path_spliced);
+        if (RecordJitEdge(&m->system->jit, m->path.start, m->ip)) {
+          dst = (u8 *)(uintptr_t)func + GetPrologueSize();
+          STATISTIC(++path_connected_directly);
+        } else {
+          STATISTIC(++path_connected_interpreter);
+          dst = (u8 *)m->system->ender;
+        }
+        AppendJitJump(m->path.jb, dst);
+        FinishPath(m);
+        func(DISPATCH_NOTHING);
+        return;
+      }
     }
+    GeneralDispatch(DISPATCH_NOTHING);
   } else {
     JitlessDispatch(DISPATCH_NOTHING);
   }

@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -23,6 +23,7 @@
 #include <sys/mman.h>
 
 #include "blink/assert.h"
+#include "blink/biosrom.h"
 #include "blink/bus.h"
 #include "blink/checked.h"
 #include "blink/debug.h"
@@ -183,13 +184,13 @@ u64 FindPageTableEntry(struct Machine *m, u64 page) {
   u64 entry;
   long tlbkey;
   unsigned level, index;
-  if (atomic_load_explicit(&m->invalidated, memory_order_acquire)) {
+  if (UNLIKELY(atomic_load_explicit(&m->invalidated, memory_order_acquire))) {
     ResetTlb(m);
     atomic_store_explicit(&m->invalidated, false, memory_order_relaxed);
   }
   tlbkey = (page >> 12) & (ARRAYLEN(m->tlb) - 1);
-  if (m->tlb[tlbkey].page == page &&
-      ((entry = m->tlb[tlbkey].entry) & PAGE_V)) {
+  if (LIKELY(m->tlb[tlbkey].page == page &&
+             ((entry = m->tlb[tlbkey].entry) & PAGE_V))) {
     STATISTIC(++tlb_hits);
     return entry;
   }
@@ -262,8 +263,8 @@ MapError:
 u8 *LookupAddress2(struct Machine *m, i64 virt, u64 mask, u64 need) {
   u8 *host;
   u64 entry;
-  if (m->mode == XED_MODE_LONG ||
-      (m->mode != XED_MODE_REAL && (m->system->cr0 & CR0_PG))) {
+  if (!m->metal || m->mode.omode == XED_MODE_LONG ||
+      (m->mode.genmode != XED_GEN_MODE_REAL && (m->system->cr0 & CR0_PG))) {
     if (!(entry = FindPageTableEntry(m, virt & -4096))) {
       return 0;
     }
@@ -300,9 +301,29 @@ u8 *LookupAddress(struct Machine *m, i64 virt) {
   return LookupAddress2(m, virt, need, need);
 }
 
-u8 *GetAddress(struct Machine *m, i64 v) {
+flattencalls u8 *GetAddress(struct Machine *m, i64 v) {
   if (HasLinearMapping()) return ToHost(v);
   return LookupAddress(m, v);
+}
+
+/**
+ * Translates virtual address into pointer.
+ *
+ * This function bypasses memory protection, since it's used to display
+ * memory in the debugger tui. That's useful, for example, if debugging
+ * programs that specify an eXecute-only program header.
+ *
+ * It's recommended that the caller use:
+ *
+ *     BEGIN_NO_PAGE_FAULTS;
+ *     i64 address = ...;
+ *     u8 *pointer = SpyAddress(m, address);
+ *     END_NO_PAGE_FAULTS;
+ *
+ * When calling this function.
+ */
+u8 *SpyAddress(struct Machine *m, i64 virt) {
+  return LookupAddress2(m, virt, 0, 0);
 }
 
 u8 *ResolveAddress(struct Machine *m, i64 v) {
@@ -316,7 +337,7 @@ bool IsValidMemory(struct Machine *m, i64 virt, i64 size, int prot) {
   u64 pte, mask, need;
   size += virt & 4095;
   virt &= -4096;
-  unassert(m->mode == XED_MODE_LONG);
+  unassert(m->mode.omode == XED_MODE_LONG);
   unassert(prot && !(prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC)));
   need = mask = 0;
   if (prot & PROT_READ) {
@@ -330,7 +351,10 @@ bool IsValidMemory(struct Machine *m, i64 virt, i64 size, int prot) {
   if (prot & PROT_EXEC) {
     mask |= PAGE_XD;
   }
-  if (CheckedAdd(virt, size, &pe) == -1) return false;
+  if (ckd_add(&pe, virt, size)) {
+    eoverflow();
+    return false;
+  }
   for (p = virt; p < pe; p += 4096) {
     if (!(pte = FindPageTableEntry(m, p))) {
       return false;
@@ -352,7 +376,7 @@ int VirtualCopy(struct Machine *m, i64 v, char *r, u64 n, bool d) {
     if (!(p = LookupAddress(m, v))) return -1;
     if (d) {
       memcpy(r, p, k);
-    } else {
+    } else if (!IsRomAddress(m, p)) {
       memcpy(p, r, k);
     }
     n -= k;
@@ -418,6 +442,15 @@ u8 *ReserveAddress(struct Machine *m, i64 v, size_t n, bool writable) {
   }
   if ((v & 4095) + n <= 4096) {
     if ((res = LookupAddress2(m, v, mask, need))) {
+      if (!IsRomAddress(m, res)) return res;
+      p1 = res;
+      m->stashaddr = v;
+      m->opcache->stashsize = n;
+      m->opcache->writable = writable;
+      res = m->opcache->stash;
+      IGNORE_RACES_START();
+      memcpy(res, p1, n);
+      IGNORE_RACES_END();
       return res;
     } else {
       ThrowSegmentationFault(m, v);
@@ -445,13 +478,16 @@ u8 *ReserveAddress(struct Machine *m, i64 v, size_t n, bool writable) {
   }
 }
 
-u8 *AccessRam(struct Machine *m, i64 v, size_t n, void *p[2], u8 *tmp,
-              bool copy) {
+static u8 *AccessRam2(struct Machine *m, i64 v, size_t n, void *p[2], u8 *tmp,
+                      bool copy, bool protect_rom) {
   u8 *a, *b;
   unsigned k;
   unassert(n <= 4096);
   if ((v & 4095) + n <= 4096) {
-    return ResolveAddress(m, v);
+    a = ResolveAddress(m, v);
+    if (!protect_rom || !IsRomAddress(m, a)) return a;
+    if (copy) memcpy(tmp, a, n);
+    return tmp;
   }
   STATISTIC(++page_overlaps);
   k = 4096;
@@ -463,9 +499,17 @@ u8 *AccessRam(struct Machine *m, i64 v, size_t n, void *p[2], u8 *tmp,
     memcpy(tmp, a, k);
     memcpy(tmp + k, b, n - k);
   }
+  if (protect_rom) {
+    if (IsRomAddress(m, a)) a = NULL;
+    if (IsRomAddress(m, b)) b = NULL;
+  }
   p[0] = a;
   p[1] = b;
   return tmp;
+}
+
+u8 *AccessRam(struct Machine *m, i64 v, size_t n, void *p[2], u8 *tmp, bool d) {
+  return AccessRam2(m, v, n, p, tmp, d, !d);
 }
 
 u8 *Load(struct Machine *m, i64 v, size_t n, u8 *b) {
@@ -484,10 +528,12 @@ u8 *BeginStoreNp(struct Machine *m, i64 v, size_t n, void *p[2], u8 *b) {
   return BeginStore(m, v, n, p, b);
 }
 
+#if 0
 u8 *BeginLoadStore(struct Machine *m, i64 v, size_t n, void *p[2], u8 *b) {
   SetWriteAddr(m, v, n);
-  return AccessRam(m, v, n, p, b, true);
+  return AccessRam2(m, v, n, p, b, true, true);
 }
+#endif
 
 void EndStore(struct Machine *m, i64 v, size_t n, void *p[2], u8 *b) {
   unsigned k;
@@ -496,10 +542,15 @@ void EndStore(struct Machine *m, i64 v, size_t n, void *p[2], u8 *b) {
   k = 4096;
   k -= v & 4095;
   unassert(n > k);
+#ifdef DISABLE_ROM
   unassert(p[0]);
   unassert(p[1]);
   memcpy(p[0], b, k);
   memcpy(p[1], b + k, n - k);
+#else
+  if (p[0]) memcpy(p[0], b, k);
+  if (p[1]) memcpy(p[1], b + k, n - k);
+#endif
 }
 
 void EndStoreNp(struct Machine *m, i64 v, size_t n, void *p[2], u8 *b) {

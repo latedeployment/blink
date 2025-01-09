@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -16,6 +16,8 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
+#include "blink/blinkenlights.h"
+
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -39,6 +41,8 @@
 
 #include "blink/assert.h"
 #include "blink/atomic.h"
+#include "blink/bda.h"
+#include "blink/biosrom.h"
 #include "blink/bitscan.h"
 #include "blink/breakpoint.h"
 #include "blink/builtin.h"
@@ -140,6 +144,7 @@ FLAGS\n\
   -b ADDR   push a breakpoint\n\
   -w ADDR   push a watchpoint\n\
   -L PATH   log file location\n\
+  -B PATH   alternate BIOS image\n\
   -Z        internal statistics\n\
 \n\
 ARGUMENTS\n\
@@ -174,8 +179,10 @@ t       sse type                  -m       disables memory safety\n\
 T       sse size                  -N       natural scroll wheel\n\
 B       pop breakpoint            -s       system call logging\n\
 p       profiling mode            -C PATH  chroot directory\n\
-ctrl-t  turbo                     -h       help\n\
-alt-t   slowmo"
+ctrl-t  turbo                     -B PATH  alternate BIOS image\n\
+alt-t   slowmo                    -z       zoom\n\
+2       toggle column 2           -h       help\n\
+3       toggle column 3"
 
 #define FPS        60     // frames per second written to tty
 #define TURBO      true   // to keep executing between frames
@@ -185,7 +192,7 @@ alt-t   slowmo"
 #define DISPWIDTH  80     // size of the embedded tty display
 #define DUMPWIDTH  64     // columns of bytes in memory panel
 #define ASMWIDTH   40     // seed the width of assembly panel
-#define ASMRAWMIN  (m->mode == XED_MODE_REAL ? 50 : 65)
+#define ASMRAWMIN  (m->mode.omode == XED_MODE_REAL ? 50 : 65)
 
 #define RESTART  0x001
 #define REDRAW   0x002
@@ -326,34 +333,42 @@ static const char kRegisterNames[3][16][4] = {
 
 extern char **environ;
 
+/* shared variables with bios.c */
+bool tuimode;
+bool ptyisenabled;
+
+int vidya;
+int ttyin;
+
+struct Pty *pty;
+struct Machine *m;
+
 static bool belay;
 static bool react;
-static bool tuimode;
 static bool alarmed;
 static bool natural;
 static bool mousemode;
 static bool wantmetal;
+static bool displayexec; /* 'D' -> DrawDisplayOnly during Exec() */
 static bool showhighsse;
 static bool showprofile;
-static bool ptyisenabled;
 static bool readingteletype;
+static bool showcolumn2 = true;
+static bool showcolumn3 = true;
 
 static int tyn;
 static int txn;
 static int tick;
 static int speed;
-static int vidya;
-static int ttyin;
+static int action;
 static int ttyout;
 static int opline;
-static int action;
 static int xmmdisp;
 static int verbose;
 static int exitcode;
 
 static long ips;
 static u64 cycle;
-static i64 oldlen;
 static i64 opstart;
 static int lastfds;
 static i64 lastrss;
@@ -366,8 +381,6 @@ static i64 mapsstart;
 static u64 last_cycle;
 static char *codepath;
 static i64 framesstart;
-static struct Pty *pty;
-static struct Machine *m;
 static jmp_buf *onbusted;
 static const char *dialog;
 static char *statusmessage;
@@ -396,7 +409,6 @@ static struct sigaction oldsig[4];
 static char pathbuf[PATH_MAX];
 struct History g_history;
 
-static void Redraw(bool);
 static void SetupDraw(void);
 static void HandleKeyboard(const char *);
 
@@ -425,25 +437,6 @@ bad evex ll\0\
 unimplemented\0\
 ";
 
-static const struct Chs {
-  ssize_t imagesize;
-  int c, h, s;
-} kChs[] = {
-    {163840, 40, 1, 8},    //
-    {184320, 40, 1, 9},    //
-    {327680, 40, 2, 8},    //
-    {368640, 40, 2, 9},    //
-    {737280, 80, 2, 9},    //
-    {1228800, 80, 2, 15},  //
-    {1474560, 80, 2, 18},  //
-    {2949120, 80, 2, 36},  //
-};
-
-static off_t diskimagesize = 0;
-static int diskcyls = 1023;
-static int diskheads = 16;  // default to 16 heads/cylinder, following QEMU
-static int disksects = 63;
-
 static char *xasprintf(const char *fmt, ...) {
   char *s;
   va_list va;
@@ -470,18 +463,26 @@ static i64 SignExtend(u64 x, char b) {
   return (i64)(x << k) >> k;
 }
 
-static void SetCarry(bool cf) {
+void SetCarry(bool cf) {
   m->flags = SetFlag(m->flags, FLAGS_CF, cf);
 }
 
 static bool IsCall(void) {
-  int dispatch = Mopcode(m->xedd->op.rde);
-  return (dispatch == 0x0E8 ||
-          (dispatch == 0x0FF && ModrmReg(m->xedd->op.rde) == 2));
+  switch (Mopcode(m->xedd->op.rde)) {
+    case 0x0CC:
+    case 0x0CD:
+    case 0x0CE:
+    case 0x0E8:
+      return true;
+    case 0x0FF:
+      return ModrmReg(m->xedd->op.rde) == 2;
+    default:
+      return false;
+  }
 }
 
 static bool IsDebugBreak(void) {
-  return Mopcode(m->xedd->op.rde) == 0x0CC;
+  return m->trapno == 3 && Mopcode(m->xedd->op.rde) == 0x0CC;
 }
 
 static bool IsRet(void) {
@@ -549,7 +550,7 @@ static u8 CycleXmmSize(u8 w) {
 }
 
 static int GetPointerWidth(void) {
-  return 2 << m->mode;
+  return 2 << m->mode.omode;
 }
 
 static i64 GetSp(void) {
@@ -605,8 +606,8 @@ static unsigned long TallyHits(i64 addr, int size) {
 static void GenerateProfile(void) {
   int sym;
   profsyms.i = 0;
-  profsyms.toto = TallyHits(m->system->codestart, m->system->codesize);
   if (!ophits) return;
+  profsyms.toto = TallyHits(m->system->codestart, m->system->codesize);
   for (sym = 0; sym < dis->syms.i; ++sym) {
     if (dis->syms.p[sym].addr >= m->system->codestart &&
         dis->syms.p[sym].addr + dis->syms.p[sym].size <
@@ -666,7 +667,7 @@ static int VirtualBing(i64 v) {
   int rc;
   jmp_buf busted;
   onbusted = &busted;
-  if ((p = (u8 *)LookupAddress(m, v))) {
+  if ((p = SpyAddress(m, v))) {
     if (!setjmp(busted)) {
       rc = kCp437[p[0] & 255];
     } else {
@@ -688,7 +689,7 @@ static int VirtualShadow(i64 v) {
   jmp_buf busted;
   if (IsShadow(v)) return -2;
   onbusted = &busted;
-  if ((p = (char *)LookupAddress(m, (v >> 3) + 0x7fff8000))) {
+  if ((p = (char *)SpyAddress(m, (v >> 3) + 0x7fff8000))) {
     if (!setjmp(busted)) {
       rc = p[0] & 0xff;
     } else {
@@ -807,7 +808,9 @@ static void OnQ(void) {
 }
 
 static void OnV(void) {
-  vidya = !vidya;
+  int mode;
+  mode = vidya == kModePty ? 3 : kModePty;
+  VidyaServiceSetMode(mode);
 }
 
 static void OnSigSys(int sig) {
@@ -839,7 +842,6 @@ static void TuiCleanup(void) {
   LOGF("TuiCleanup");
   sigaction(SIGCONT, oldsig + 2, 0);
   TtyRestore();
-  tuimode = false;
 }
 
 static void OnSigTstp(int sig, siginfo_t *si, void *uc) {
@@ -891,10 +893,7 @@ static int DrainInput(int fd) {
   for (;;) {
     fds[0].fd = fd;
     fds[0].events = POLLIN;
-#ifdef __COSMOPOLITAN__
-    if (!IsWindows())
-#endif
-      if (VfsPoll(fds, ARRAYLEN(fds), 0) == -1) return -1;
+    if (VfsPoll(fds, ARRAYLEN(fds), 0) == -1) return -1;
     if (!(fds[0].revents & POLLIN)) break;
     if (VfsRead(fd, buf, sizeof(buf)) == -1) return -1;
   }
@@ -955,6 +954,7 @@ void TuiSetup(void) {
     CommonSetup();
     VfsTcgetattr(ttyout, &oldterm);
     atexit(TtyRestore);
+    AtAbort(TtyRestore);
     once = true;
     report = true;
   }
@@ -985,7 +985,7 @@ static void ExecSetup(void) {
   it.it_interval.tv_usec = 1. / FPS * 1e6;
   it.it_value.tv_sec = 0;
   it.it_value.tv_usec = 1. / FPS * 1e6;
-  setitimer(ITIMER_REAL, &it, 0);
+  if (!m->metal) setitimer(ITIMER_REAL, &it, 0);
 }
 
 static void pcmpeqb(u8 x[16], const u8 y[16]) {
@@ -1037,7 +1037,7 @@ static int PickNumberOfXmmRegistersToShow(void) {
 }
 
 static int GetRegHexWidth(void) {
-  switch (m->mode & 3) {
+  switch (m->mode.omode) {
     case XED_MODE_LONG:
       return 16;
     case XED_MODE_LEGACY:
@@ -1057,7 +1057,7 @@ static int GetRegHexWidth(void) {
 }
 
 static int GetAddrHexWidth(void) {
-  switch (m->mode & 3) {
+  switch (m->mode.omode) {
     case XED_MODE_LONG:
       return 12;
     case XED_MODE_LEGACY:
@@ -1074,11 +1074,12 @@ static int GetAddrHexWidth(void) {
 }
 
 bool ShouldShowDisplay(void) {
-  if (vidya) return true;  // in bios video mode
+  if (vidya != kModePty) return true;  // in bios video mode
+  if (displayexec) return true;
   return ptyisenabled;
 }
 
-void SetupDraw(void) {
+static void SetupDraw(void) {
   int i, j, n, a, b, yn, fit, cpuy, ssey, dx[2], c2y[3], c3y[5];
 
   cpuy = 9;
@@ -1091,6 +1092,8 @@ void SetupDraw(void) {
       DISPWIDTH,
       GetAddrHexWidth() + 1 + DUMPWIDTH,
   };
+  if (!showcolumn2) column[1] = 0;
+  if (!showcolumn3) column[2] = 0;
   bool growable[3] = {
       true,
       false,
@@ -1196,6 +1199,10 @@ void SetupDraw(void) {
   pan.display.left = dx[0];
   pan.display.bottom = yn;
   pan.display.right = dx[1] - 1;
+  if (wantmetal) {
+    unassert(pan.display.right - pan.display.left <= 80);
+    unassert(pan.display.bottom - pan.display.top == 25);
+  }
 
   /* COLUMN #3: REGISTERS, VECTORS, CODE, MEMORY READS, MEMORY WRITES, STACK */
 
@@ -1376,14 +1383,18 @@ static void DrawTerminal(struct Panel *p) {
 
 static void DrawDisplay(struct Panel *p) {
   switch (vidya) {
-    case 7:
-      DrawHr(&pan.displayhr, "MONOCHROME DISPLAY ADAPTER");
-      DrawMda(p, (u8(*)[80][2])(m->system->real + 0xb0000));
-      break;
-    case 3:
+    case 0:  // CGA 40x25 16-gray
+    case 1:  // CGA 40x25 16-color
+    case 2:  // CGA 80x25 16-gray
+    case 3:  // CGA 80x25 16-color
       DrawHr(&pan.displayhr, "COLOR GRAPHICS ADAPTER");
-      DrawCga(p, (u8(*)[80][2])(m->system->real + 0xb8000));
+      DrawCga(p, m->system->real + 0xb8000);
       break;
+    case 7:  // MDA 80x25 4-gray
+      DrawHr(&pan.displayhr, "MONOCHROME DISPLAY ADAPTER");
+      DrawMda(p, (u8(*)[80][2])(m->system->real + 0xb0000), pty->x, pty->y);
+      break;
+    case kModePty:
     default:
       DrawTerminalHr(&pan.displayhr);
       DrawTerminal(p);
@@ -1403,7 +1414,7 @@ static void DrawRegister(struct Panel *p, i64 i, i64 r, bool first) {
   value = Read64(m->weg[r]);
   previous = Read64(laststate.weg[r]);
   if (value != previous) AppendPanel(p, i, "\033[7m");
-  snprintf(buf, sizeof(buf), "%-3s", kRegisterNames[m->mode][r]);
+  snprintf(buf, sizeof(buf), "%-3s", kRegisterNames[m->mode.omode][r]);
   AppendPanel(p, i, buf);
   AppendPanel(p, i, " ");
   snprintf(buf, sizeof(buf), "%0*" PRIx64, GetRegHexWidth(), value);
@@ -1413,15 +1424,22 @@ static void DrawRegister(struct Panel *p, i64 i, i64 r, bool first) {
 }
 
 static void DrawSegment(struct Panel *p, i64 i, struct DescriptorCache value,
-                        struct DescriptorCache previous, const char *name) {
+                        struct DescriptorCache previous, const char *name,
+                        bool fsgs) {
   bool changed = value.sel != previous.sel || value.base != previous.base;
   char buf[32];
   if (changed) AppendPanel(p, i, "\033[7m");
   snprintf(buf, sizeof(buf), "%-3s", name);
   AppendPanel(p, i, buf);
   AppendPanel(p, i, " ");
-  snprintf(buf, sizeof(buf), "%04" PRIx16 " @ %012" PRIx64, value.sel,
-           value.base);
+  if (fsgs) {
+    // only FS & GS can have segment bases beyond the 4 GiB mark
+    snprintf(buf, sizeof(buf), "%04" PRIx16 " @ %016" PRIx64, value.sel,
+             value.base);
+  } else {
+    snprintf(buf, sizeof(buf), "%04" PRIx16 " @ %08" PRIx64, value.sel,
+             value.base);
+  }
   AppendPanel(p, i, buf);
   if (changed) AppendPanel(p, i, "\033[27m");
   AppendPanel(p, i, "  ");
@@ -1457,7 +1475,7 @@ static void DrawCpu(struct Panel *p) {
   DrawRegister(p, 5, 9, 1), DrawRegister(p, 5, 13, 0), DrawSt(p, 5, 5);
   DrawRegister(p, 6, 10, 1), DrawRegister(p, 6, 14, 0), DrawSt(p, 6, 6);
   DrawRegister(p, 7, 11, 1), DrawRegister(p, 7, 15, 0), DrawSt(p, 7, 7);
-  snprintf(buf, sizeof(buf), "%-3s %0*" PRIx64 "  FLG", kRipName[m->mode],
+  snprintf(buf, sizeof(buf), "%-3s %0*" PRIx64 "  FLG", kRipName[m->mode.omode],
            GetRegHexWidth(), m->ip);
   AppendPanel(p, 8, buf);
   DrawFlag(p, 8, 'C', GetFlag(m->flags, FLAGS_CF));
@@ -1483,12 +1501,12 @@ static void DrawCpu(struct Panel *p) {
   if (m->fpu.sw & kFpuSwC2) AppendPanel(p, 8, " C2");
   if (m->fpu.sw & kFpuSwBf) AppendPanel(p, 8, " BF");
 #endif
-  DrawSegment(p, 9, m->fs, laststate.fs, "FS");
-  DrawSegment(p, 9, m->ds, laststate.ds, "DS");
-  DrawSegment(p, 9, m->cs, laststate.cs, "CS");
-  DrawSegment(p, 10, m->gs, laststate.gs, "GS");
-  DrawSegment(p, 10, m->es, laststate.es, "ES");
-  DrawSegment(p, 10, m->ss, laststate.ss, "SS");
+  DrawSegment(p, 9, m->fs, laststate.fs, "FS", true);
+  DrawSegment(p, 9, m->ds, laststate.ds, "DS", false);
+  DrawSegment(p, 9, m->cs, laststate.cs, "CS", false);
+  DrawSegment(p, 10, m->gs, laststate.gs, "GS", true);
+  DrawSegment(p, 10, m->es, laststate.es, "ES", false);
+  DrawSegment(p, 10, m->ss, laststate.ss, "SS", false);
 }
 
 static void DrawXmm(struct Panel *p, i64 i, i64 r) {
@@ -1808,7 +1826,7 @@ static void DrawBreakpoints(struct Panel *p) {
 }
 
 static int GetPreferredStackAlignmentMask(void) {
-  switch (m->mode) {
+  switch (m->mode.omode) {
     case XED_MODE_LONG:
       return 15;
     case XED_MODE_LEGACY:
@@ -1855,13 +1873,13 @@ static void DrawFrames(struct Panel *p) {
     }
     ++i;
     if (((m->ss.base + bp) & 0xfff) > 0xff0) break;
-    if (!(r = LookupAddress(m, m->ss.base + bp))) {
+    if (!(r = SpyAddress(m, m->ss.base + bp))) {
       AppendPanel(p, i - framesstart, "CORRUPT FRAME POINTER");
       break;
     }
     sp = bp;
-    bp = ReadWordSafely(m->mode, r + 0);
-    rp = ReadWordSafely(m->mode, r + 8);
+    bp = ReadWordSafely(m->mode.omode, r + 0);
+    rp = ReadWordSafely(m->mode.omode, r + 8);
   }
 }
 
@@ -1874,7 +1892,7 @@ static void CheckFramePointerImpl(void) {
   lastbp = bp;
   rp = m->ip;
   while (bp) {
-    if (!(r = LookupAddress(m, m->ss.base + bp))) {
+    if (!(r = SpyAddress(m, m->ss.base + bp))) {
       LOGF("corrupt frame: %0*" PRIx64 "", GetAddrHexWidth(), bp);
       ThrowProtectionFault(m);
     }
@@ -2106,25 +2124,25 @@ static void ShowHistory(void) {
   free(ansi);
 }
 
-static void Redraw(bool force) {
+void Redraw(bool force) {
   int i, j;
   char *ansi;
   size_t size;
   double execsecs;
   struct timespec start_draw, end_draw;
-  if (!tuimode) return;
+  if (displayexec) return;
   if (g_history.viewing) {
     ShowHistory();
     return;
   }
-  LookupAddress(m, m->ip);
-  LookupAddress(m, Get64(m->sp));
+  LookupAddress(m, m->ip);         // want page fault
+  LookupAddress(m, Get64(m->sp));  // want page fault
   BEGIN_NO_PAGE_FAULTS;
   start_draw = GetTime();
   execsecs = ToNanoseconds(SubtractTime(start_draw, last_draw)) * 1e-9;
-  oldlen = m->xedd->length;
   ips = last_cycle ? (cycle - last_cycle) / execsecs : 0;
   SetupDraw();
+  ScrollOp(&pan.disassembly, GetDisIndex());
   for (i = 0; i < ARRAYLEN(pan.p); ++i) {
     for (j = 0; j < pan.p[i].bottom - pan.p[i].top; ++j) {
       pan.p[i].lines[j].i = 0;
@@ -2175,7 +2193,7 @@ static void Redraw(bool force) {
   last_draw = GetTime();
 }
 
-static void ReactiveDraw(void) {
+void ReactiveDraw(void) {
   if (tuimode) {
     // LOGF("%" PRIx64 " %s ReactiveDraw", GetPc(m), tuimode ? "TUI" : "EXEC");
     Redraw(true);
@@ -2231,10 +2249,15 @@ static void HandleAlarm(void) {
 static void HandleTerminalResize(void) {
   GetTtySize(ttyout);
   ClearHistory();
+  dis->ops.i = 0;
 }
 
-static void HandleAppReadInterrupt(void) {
+void HandleAppReadInterrupt(bool errflag) {
   LOGF("HandleAppReadInterrupt");
+  if (errflag) {
+    exitcode = 0;
+    action |= EXIT;
+  }
   if (action & ALARM) {
     HandleAlarm();
   }
@@ -2249,8 +2272,8 @@ static void HandleAppReadInterrupt(void) {
     if (action & CONTINUE) {
       action &= ~CONTINUE;
     } else {
-      LeaveScreen();
-      exit(0);
+      tuimode = true;
+      displayexec = false;
     }
   }
 }
@@ -2264,10 +2287,7 @@ static bool HasPendingInput(int fd) {
   fds[0].fd = fd;
   fds[0].events = POLLIN;
   fds[0].revents = 0;
-#ifdef __COSMOPOLITAN__
-  if (!IsWindows())
-#endif
-    VfsPoll(fds, ARRAYLEN(fds), 0);
+  VfsPoll(fds, ARRAYLEN(fds), 0);
   return fds[0].revents & (POLLIN | POLLERR);
 }
 
@@ -2299,7 +2319,7 @@ static struct Mouse ParseMouse(char *p) {
   return m;
 }
 
-static ssize_t ReadAnsi(int fd, char *p, size_t n) {
+ssize_t ReadAnsi(int fd, char *p, size_t n) {
   ssize_t rc;
   struct Mouse mo;
   for (;;) {
@@ -2329,7 +2349,7 @@ static ssize_t ReadAnsi(int fd, char *p, size_t n) {
       return rc;
     } else {
       unassert(errno == EINTR);
-      HandleAppReadInterrupt();
+      HandleAppReadInterrupt(false);
       return eintr();
     }
   }
@@ -2420,9 +2440,12 @@ static int OnPtyFdPoll(struct pollfd *fds, nfds_t nfds, int ms) {
   return t;
 }
 
-static void DrawDisplayOnly(struct Panel *p) {
-  struct Buffer b;
+void DrawDisplayOnly(void) {
+  struct Panel *p;
   int i, y, yn, xn, tly, tlx;
+  struct Buffer b;
+  char buf[64];
+  p = &pan.display;
   yn = MIN(tyn, p->bottom - p->top);
   xn = MIN(txn, p->right - p->left);
   for (i = 0; i < yn; ++i) {
@@ -2430,20 +2453,32 @@ static void DrawDisplayOnly(struct Panel *p) {
   }
   DrawDisplay(p);
   memset(&b, 0, sizeof(b));
-  tly = tyn / 2 - yn / 2;
-  tlx = txn / 2 - xn / 2;
+  if (displayexec) {
+    tly = tyn / 2 - yn / 2;
+    tlx = txn / 2 - xn / 2;
+  } else {
+    tly = p->top;
+    tlx = p->left;
+  }
   AppendStr(&b, "\033[0m\033[H");
   for (y = 0; y < tyn; ++y) {
-    if (y) AppendStr(&b, "\r\n");
-    if (tly <= y && y <= tly + yn) {
-      for (i = 0; i < tlx; ++i) {
-        AppendChar(&b, ' ');
+    if (displayexec && y) AppendStr(&b, "\r\n");
+    if (tly <= y && y < tly + yn) {
+      if (!displayexec) {
+        sprintf(buf, "\033[%d;%dH", y + 1, tlx + 1);
+        AppendStr(&b, buf);
+      } else {
+        for (i = 0; i < tlx; ++i) {
+          AppendChar(&b, ' ');
+        }
       }
+      // FIXME truncate on right side, should use RenderPanel
       AppendData(&b, p->lines[y - tly].p, p->lines[y - tly].i);
     }
-    AppendStr(&b, "\033[0m\033[K");
+    AppendStr(&b, "\033[0m");
+    if (displayexec) AppendStr(&b, "\033[K");
   }
-  VfsWrite(ttyout, b.p, b.i);
+  UninterruptibleWrite(ttyout, b.p, b.i);
   free(b.p);
 }
 
@@ -2588,8 +2623,9 @@ static void OnExitTrap(void) {
   tuimode = true;
   action |= MODAL;
   action &= ~CONTINUE;
+  exitcode = m->system->exitcode;
   snprintf(systemfailure, sizeof(systemfailure), "guest called exit_group(%d)",
-           m->system->exitcode);
+           exitcode);
 }
 
 static void OnSegmentationFault(void) {
@@ -2629,431 +2665,38 @@ static void OnFpuException(void) {
 }
 
 static void OnExit(int rc) {
+  if (tuimode) {
+    action |= MODAL;
+    action &= ~CONTINUE;
+  } else {
+    action |= EXIT;
+  }
   exitcode = rc;
-  action |= EXIT;
-}
-
-static size_t GetLastIndex(size_t size, unsigned unit, int i, unsigned limit) {
-  unsigned q, r;
-  if (!size) return 0;
-  q = size / unit;
-  r = size % unit;
-  if (!r) --q;
-  q += i;
-  if (q > limit) q = limit;
-  return q;
-}
-
-static void OnDiskServiceReset(void) {
-  m->ah = 0x00;
-  SetCarry(false);
-}
-
-static void OnDiskServiceBadCommand(void) {
-  m->ah = 0x01;
-  SetCarry(true);
-}
-
-static void DetermineChs(void) {
-  int i;
-  struct stat st;
-  off_t size = diskimagesize;
-  if (size) return;  // do nothing if disk geometry already detected
-  unassert(!VfsStat(AT_FDCWD, m->system->elf.prog, &st, 0));
-  diskimagesize = size = st.st_size;
-  for (i = 0; i < ARRAYLEN(kChs); ++i) {
-    if (size == kChs[i].imagesize) {
-      diskcyls = kChs[i].c;
-      diskheads = kChs[i].h;
-      disksects = kChs[i].s;
-      return;
-    }
-  }
-}
-
-static void OnDiskServiceGetParams(void) {
-  size_t lastsector, lastcylinder, lasthead;
-  DetermineChs();
-  lastcylinder =
-      GetLastIndex(diskimagesize, 512 * disksects * diskheads, 0, 1023);
-  lasthead = GetLastIndex(diskimagesize, 512 * disksects, 0, diskheads - 1);
-  lastsector = GetLastIndex(diskimagesize, 512, 1, disksects);
-  m->dl = 1;
-  m->dh = lasthead;
-  m->cl = lastcylinder >> 8 << 6 | lastsector;
-  m->ch = lastcylinder;
-  m->bl = 4;  // CMOS drive type: 1.4M floppy
-  m->ah = 0;
-  m->es.sel = m->es.base = 0;
-  Put16(m->di, 0);
-  SetCarry(false);
-}
-
-static void OnDiskServiceReadSectors(void) {
-  int fd;
-  i64 addr, size;
-  i64 sectors, drive, head, cylinder, sector, offset;
-  DetermineChs();
-  sectors = m->al;
-  drive = m->dl;
-  head = m->dh;
-  cylinder = (m->cl & 192) << 2 | m->ch;
-  sector = (m->cl & 63) - 1;
-  size = sectors * 512;
-  offset = sector * 512 + head * 512 * disksects +
-           cylinder * 512 * disksects * diskheads;
-  (void)drive;
-  ELF_LOGF("bios read sectors %" PRId64 " "
-           "@ sector %" PRId64 " cylinder %" PRId64 " head %" PRId64
-           " drive %" PRId64 " offset %#" PRIx64 " from %s",
-           sectors, sector, cylinder, head, drive, offset, m->system->elf.prog);
-  addr = m->es.base + Get16(m->bx);
-  if (addr >= kRealSize || size > kRealSize || addr + size > kRealSize) {
-    LOGF("bios disk read exceeded real memory");
-    m->al = 0x00;
-    m->ah = 0x02;  // cannot find address mark
-    SetCarry(true);
-    return;
-  }
-  errno = 0;
-  if ((fd = VfsOpen(AT_FDCWD, m->system->elf.prog, O_RDONLY, 0)) != -1 &&
-      VfsPread(fd, m->system->real + addr, size, offset) == size) {
-    SetWriteAddr(m, addr, size);
-    m->ah = 0x00;  // success
-    SetCarry(false);
+  if (rc == kMachineHalt) {
+    strcpy(systemfailure, "SYSTEM HALTED");
   } else {
-    LOGF("bios read sectors failed: %s", DescribeHostErrno(errno));
-    m->al = 0x00;
-    m->ah = 0x0d;  // invalid number of sector
-    SetCarry(true);
-  }
-  VfsClose(fd);
-}
-
-static void OnDiskServiceProbeExtended(void) {
-  u8 drive = m->dl;
-  u16 magic = Get16(m->bx);
-  (void)drive;
-  if (magic == 0x55AA) {
-    Put16(m->bx, 0xAA55);
-    m->ah = 0x30;
-    SetCarry(false);
-  } else {
-    m->ah = 0x01;
-    SetCarry(true);
+    snprintf(systemfailure, sizeof(systemfailure), "UNHANDLED INTERRUPT %#x",
+             rc);
   }
 }
 
-static void OnDiskServiceReadSectorsExtended(void) {
-  int fd;
-  u8 drive = m->dl;
-  i64 pkt_addr = m->ds.base + Get16(m->si), addr, sectors, size, lba, offset;
-  u8 pkt_size, *pkt;
-  (void)drive;
-  SetReadAddr(m, pkt_addr, 1);
-  pkt = m->system->real + pkt_addr;
-  pkt_size = Get8(pkt);
-  if ((pkt_size != 0x10 && pkt_size != 0x18) || Get8(pkt + 1) != 0) {
-    m->ah = 0x01;
-    SetCarry(true);
-  } else {
-    SetReadAddr(m, pkt_addr, pkt_size);
-    addr = Read32(pkt + 4);
-    if (addr == 0xFFFFFFFF && pkt_size == 0x18) {
-      addr = Read64(pkt + 0x10);
-    } else {
-      addr = (addr >> 16 << 4) + (addr & 0xFFFF);
-    }
-    sectors = Read16(pkt + 2);
-    size = sectors * 512;
-    lba = Read32(pkt + 8);
-    offset = lba * 512;
-    ELF_LOGF("bios read sector ext "
-             "lba=%" PRId64 " "
-             "offset=%" PRIx64 " "
-             "size=%" PRIx64,
-             lba, offset, size);
-    if (addr >= kRealSize || size > kRealSize || addr + size > kRealSize) {
-      LOGF("bios disk read exceeded real memory");
-      SetWriteAddr(m, pkt_addr + 2, 2);
-      Write16(pkt + 2, 0);
-      m->ah = 0x02;  // cannot find address mark
-      SetCarry(true);
-      return;
-    }
-    errno = 0;
-    if ((fd = VfsOpen(AT_FDCWD, m->system->elf.prog, O_RDONLY, 0)) != -1 &&
-        VfsPread(fd, m->system->real + addr, size, offset) == size) {
-      SetWriteAddr(m, addr, size);
-      m->ah = 0x00;  // success
-      SetCarry(false);
-    } else {
-      LOGF("bios read sector failed: %s", DescribeHostErrno(errno));
-      SetWriteAddr(m, pkt_addr + 2, 2);
-      Write16(pkt + 2, 0);
-      m->ah = 0x0d;  // invalid number of sectors
-      SetCarry(true);
-    }
-    VfsClose(fd);
-  }
-}
-
-static void OnDiskService(void) {
-  switch (m->ah) {
-    case 0x00:
-      OnDiskServiceReset();
-      break;
-    case 0x02:
-      OnDiskServiceReadSectors();
-      break;
-    case 0x08:
-      OnDiskServiceGetParams();
-      break;
-    case 0x41:
-      OnDiskServiceProbeExtended();
-      break;
-    case 0x42:
-      OnDiskServiceReadSectorsExtended();
-      break;
-    default:
-      OnDiskServiceBadCommand();
-      break;
-  }
-}
-
-static void OnVidyaServiceSetMode(void) {
-  if (LookupAddress(m, 0xB0000)) {
-    vidya = m->al;
-    ptyisenabled = true;
-    ReactiveDraw();
-  } else {
-    LOGF("maybe you forgot -r flag");
-  }
-}
-
-static void OnVidyaServiceGetMode(void) {
-  m->al = vidya;
-  m->ah = 80;  // columns
-  m->bh = 0;   // page
-}
-
-static void OnVidyaServiceSetCursorPosition(void) {
-  PtySetY(pty, m->dh);
-  PtySetX(pty, m->dl);
-}
-
-static void OnVidyaServiceGetCursorPosition(void) {
-  m->dh = pty->y;
-  m->dl = pty->x;
-  m->ch = 5;  // cursor ▂ scan lines 5..7 of 0..7
-  m->cl = 7 | !!(pty->conf & kPtyNocursor) << 5;
-}
-
-static int GetVidyaByte(unsigned char b) {
-  if (0x20 <= b && b <= 0x7F) return b;
-#if 0
-  /*
-   * The original hardware displayed 0x00, 0x20, and 0xff as space. It
-   * made sense for viewing sparse binary data that 0x00 be blank. But
-   * it doesn't make sense for dense data too, and we don't need three
-   * space characters. So we diverge in our implementation and display
-   * 0xff as lambda.
-   */
-  if (b == 0xFF) b = 0x00;
-#endif
-  return kCp437[b];
-}
-
-static void OnVidyaServiceWriteCharacter(void) {
-  int i;
-  u64 w;
-  char *p, buf[32];
-  p = buf;
-  p += FormatCga(m->bl, p);
-  p = stpcpy(p, "\0337");
-  w = tpenc(GetVidyaByte(m->al));
-  do {
-    *p++ = w;
-  } while ((w >>= 8));
-  p = stpcpy(p, "\0338");
-  for (i = Get16(m->cx); i--;) {
-    PtyWrite(pty, buf, p - buf);
-  }
-}
-
-static wint_t VidyaServiceXlatTeletype(u8 c) {
-  switch (c) {
-    case '\a':
-    case '\b':
-    case '\r':
-    case '\n':
-    case 0177:
-      return c;
-    default:
-      return GetVidyaByte(c);
-  }
-}
-
-static void OnVidyaServiceTeletypeOutput(void) {
-  int n;
-  u64 w;
-  char buf[12];
-  if (!ptyisenabled) {
-    ptyisenabled = true;
-    ReactiveDraw();
-  }
-  n = 0 /* FormatCga(m->bl, buf) */;
-  w = tpenc(VidyaServiceXlatTeletype(m->al));
-  do {
-    buf[n++] = w;
-  } while ((w >>= 8));
-  PtyWrite(pty, buf, n);
-}
-
-static void OnVidyaService(void) {
-  switch (m->ah) {
-    case 0x00:
-      OnVidyaServiceSetMode();
-      break;
-    case 0x02:
-      OnVidyaServiceSetCursorPosition();
-      break;
-    case 0x03:
-      OnVidyaServiceGetCursorPosition();
-      break;
-    case 0x09:
-      OnVidyaServiceWriteCharacter();
-      break;
-    case 0x0E:
-      OnVidyaServiceTeletypeOutput();
-      break;
-    case 0x0F:
-      OnVidyaServiceGetMode();
-      break;
-    default:
-      break;
-  }
-}
-
-static void OnKeyboardServiceReadKeyPress(void) {
-  uint8_t b;
-  ssize_t rc;
-  static char buf[32];
-  static size_t pending;
-  LOGF("OnKeyboardServiceReadKeyPress");
-  if (!ptyisenabled) {
-    ptyisenabled = true;
-    ReactiveDraw();
-  }
-  if (!tuimode) {
-    tuimode = true;
-    action |= CONTINUE;
-  }
-  pty->conf |= kPtyBlinkcursor;
-  if (!pending) {
-    rc = ReadAnsi(ttyin, buf, sizeof(buf));
-    if (rc > 0) {
-      pending = rc;
-    } else if (rc == -1 && errno == EINTR) {
-      return;
-    } else {
-      exitcode = 0;
-      action |= EXIT;
-      return;
-    }
-  }
-  b = buf[0];
-  if (pending > 1) {
-    memmove(buf, buf + 1, pending - 1);
-  }
-  --pending;
-  pty->conf &= ~kPtyBlinkcursor;
-  ReactiveDraw();
-  if (b == 0177) b = '\b';
-  m->ax[0] = b;
-  m->ax[1] = 0;
-}
-
-static void OnKeyboardService(void) {
-  switch (m->ah) {
-    case 0x00:
-      OnKeyboardServiceReadKeyPress();
-      break;
-    default:
-      break;
-  }
-}
-
-static void OnApmService(void) {
-  if (Get16(m->ax) == 0x5300 && Get16(m->bx) == 0x0000) {
-    Put16(m->bx, 'P' << 8 | 'M');
-    SetCarry(false);
-  } else if (Get16(m->ax) == 0x5301 && Get16(m->bx) == 0x0000) {
-    SetCarry(false);
-  } else if (Get16(m->ax) == 0x5307 && m->bl == 1 && m->cl == 3) {
-    LOGF("APM SHUTDOWN");
-    exit(0);
-  } else {
-    SetCarry(true);
-  }
-}
-
-static void OnE820(void) {
-  i64 addr;
-  u8 p[20];
-  addr = m->es.base + Get16(m->di);
-  if (Get32(m->dx) == 0x534D4150 && Get32(m->cx) == 24 &&
-      addr + (int)sizeof(p) <= kRealSize) {
-    if (!Get32(m->bx)) {
-      Store64(p + 0, 0);
-      Store64(p + 8, kRealSize);
-      Store32(p + 16, 1);
-      memcpy(m->system->real + addr, p, sizeof(p));
-      SetWriteAddr(m, addr, sizeof(p));
-      Put32(m->cx, sizeof(p));
-      Put32(m->bx, 1);
-    } else {
-      Put32(m->bx, 0);
-      Put32(m->cx, 0);
-    }
-    Put32(m->ax, 0x534D4150);
-    SetCarry(false);
-  } else {
-    SetCarry(true);
-  }
-}
-
-static void OnInt15h(void) {
-  if (Get32(m->ax) == 0xE820) {
-    OnE820();
-  } else if (m->ah == 0x53) {
-    OnApmService();
-  } else {
-    SetCarry(true);
-  }
+bool HasPendingKeyboard(void) {
+  return HasPendingInput(ttyin);
 }
 
 static bool OnHalt(int interrupt) {
   SYS_LOGF("%" PRIx64 " %s OnHalt(%#x)", GetPc(m), tuimode ? "TUI" : "EXEC",
            interrupt);
+  if (interrupt >= 0) m->oplen = 0;
   ReactiveDraw();
+  if (OnCallBios(interrupt)) {
+    return true;
+  }
   switch (interrupt) {
     case 1:
     case 3:
       OnDebug();
       return false;
-    case 0x13:
-      OnDiskService();
-      return true;
-    case 0x10:
-      OnVidyaService();
-      return true;
-    case 0x15:
-      OnInt15h();
-      return true;
-    case 0x16:
-      OnKeyboardService();
-      return true;
     case kMachineEscape:
       return true;
     case kMachineSegmentationFault:
@@ -3071,6 +2714,7 @@ static bool OnHalt(int interrupt) {
     case kMachineDecodeError:
       OnDecodeError();
       return true;
+    case 0:
     case kMachineDivideError:
       OnDivideError();
       return true;
@@ -3082,7 +2726,7 @@ static bool OnHalt(int interrupt) {
       return true;
     case kMachineHalt:
     default:
-      OnExit(interrupt & 255);
+      OnExit(interrupt);
       return false;
   }
 }
@@ -3104,6 +2748,15 @@ static void OnLongBranch(struct Machine *m) {
     Disassemble();
   }
 }
+
+#ifndef DISABLE_ROM
+static void OnRomWriteAttempt(struct Machine *m, u8 *r) {
+  int w = GetAddrHexWidth();
+  (void)w;
+  LOGF("attempt to write to rom address %0*tx @ %0*" PRIx64, w,
+       r - m->system->real, w, GetPc(m));
+}
+#endif
 
 static void SetStatus(const char *fmt, ...) {
   char *s;
@@ -3182,6 +2835,7 @@ static void OnStep(void) {
   if (action & MODAL) return;
   action |= STEP;
   action &= ~NEXT;
+  action &= ~FINISH;
   action &= ~CONTINUE;
 }
 
@@ -3254,15 +2908,8 @@ static void OnXmmDisp(void) {
   SetXmmDisp(CycleXmmDisp(xmmdisp));
 }
 
-static bool HasPendingKeyboard(void) {
-  return HasPendingInput(ttyin);
-}
-
 static void Sleep(int ms) {
-#ifdef __COSMOPOLITAN__
-  if (!IsWindows())
-#endif
-    VfsPoll((struct pollfd[]){{ttyin, POLLIN}}, 1, ms);
+  VfsPoll((struct pollfd[]){{ttyin, POLLIN}}, 1, ms);
 }
 
 static void OnMouseWheelUp(struct Panel *p, int y, int x) {
@@ -3376,7 +3023,8 @@ static void HandleKeyboard(const char *k) {
     CASE('n', OnNext());
     CASE('f', OnFinish());
     CASE('c', OnContinueTui());
-    CASE('C', OnContinueExec());
+    CASE('C', displayexec = false; OnContinueExec());
+    CASE('D', displayexec = true; OnContinueExec());
     CASE('R', OnRestart());
     CASE('x', OnXmmDisp());
     CASE('t', OnXmmType());
@@ -3389,6 +3037,8 @@ static void HandleKeyboard(const char *k) {
     CASE('M', ToggleMouseTracking());
     CASE('\r', OnEnter());
     CASE('\n', OnEnter());
+    CASE('2', showcolumn2 = !showcolumn2);
+    CASE('3', showcolumn3 = !showcolumn3);
     CASE(Ctrl('C'), OnInt());
     CASE(Ctrl('D'), action |= EXIT);
     CASE(Ctrl('\\'), raise(SIGQUIT));
@@ -3587,7 +3237,7 @@ static void Exec(void) {
         CheckFramePointer();
         if (action & ALARM) {
           /* TODO(jart): Fix me */
-          /* DrawDisplayOnly(&pan.display); */
+          /* DrawDisplayOnly(); */
           action &= ~ALARM;
         }
         if (action & EXIT) {
@@ -3600,6 +3250,8 @@ static void Exec(void) {
             LOGF("REACT");
             action &= ~(INT | STEP | FINISH | NEXT);
             tuimode = true;
+            displayexec = false;
+            break;
           } else {
             action &= ~INT;
             EnqueueSignal(m, SIGINT_LINUX);
@@ -3611,8 +3263,14 @@ static void Exec(void) {
     if (IsMakingPath(m)) {
       AbandonPath(m);
     }
+    // if sigsetjmp fake-returned 1, the actual trap number might have been
+    // either 1 or 0; this should have been stored in m->trapno
+    if (interrupt == 1) interrupt = m->trapno;
     if (OnHalt(interrupt)) {
       if (!tuimode) {
+        if (displayexec) {
+          DrawDisplayOnly();
+        }
         goto KeepGoing;
       }
     }
@@ -3718,12 +3376,14 @@ static void Tui(void) {
             action &= ~NEXT;
             if (IsCall()) {
               BreakAtNextInstruction();
+              tuimode = false;
               break;
             }
           }
           if (action & FINISH) {
             if (IsCall()) {
               BreakAtNextInstruction();
+              tuimode = false;
               break;
             } else if (IsRet()) {
               action &= ~FINISH;
@@ -3776,6 +3436,7 @@ static void Tui(void) {
     if (IsMakingPath(m)) {
       AbandonPath(m);
     }
+    if (interrupt == 1) interrupt = m->trapno;
     if (OnHalt(interrupt)) {
       ReactiveDraw();
       ScrollMemoryViews();
@@ -3784,8 +3445,10 @@ static void Tui(void) {
     ReactiveDraw();
     ScrollOp(&pan.disassembly, GetDisIndex());
   }
-  m->canhalt = false;
-  TuiCleanup();
+  if ((action & EXIT)) {
+    m->canhalt = false;
+    TuiCleanup();
+  }
 }
 
 _Noreturn static void PrintVersion(void) {
@@ -3804,7 +3467,7 @@ static void GetOpts(int argc, char *argv[]) {
 #ifndef DISABLE_VFS
   FLAG_prefix = getenv("BLINK_PREFIX");
 #endif
-  while ((opt = GetOpt(argc, argv, "0hjmvVtrzRNsZb:Hw:L:C:")) != -1) {
+  while ((opt = GetOpt(argc, argv, "0hjmvVtrzRNsZb:Hw:L:C:B:")) != -1) {
     switch (opt) {
       case '0':
         FLAG_zero = true;
@@ -3867,6 +3530,9 @@ static void GetOpts(int argc, char *argv[]) {
         WriteErrorString("error: overlays support was disabled\n");
 #endif
         break;
+      case 'B':
+        FLAG_bios = optarg_;
+        break;
       case 'z':
         ++codeview.zoom;
         ++readview.zoom;
@@ -3905,7 +3571,13 @@ int VirtualMachine(int argc, char *argv[]) {
   optind_++;
   do {
     action = 0;
-    LoadProgram(m, codepath, codepath, argv + optind_ - 1 + FLAG_zero, environ);
+    ptyisenabled = false;
+    vidya = m->metal ? 3 : kModePty;
+    if (vidya != kModePty) {
+      VidyaServiceSetMode(vidya);
+    }
+    LoadProgram(m, codepath, codepath, argv + optind_ - 1 + FLAG_zero, environ,
+                FLAG_bios);
     if (m->system->codesize) {
       ophits = (unsigned long *)AllocateBig(
           m->system->codesize * sizeof(unsigned long), PROT_READ | PROT_WRITE,
@@ -4006,9 +3678,12 @@ int main(int argc, char *argv[]) {
   struct System *s;
   static struct sigaction sa;
   setlocale(LC_ALL, "");
-  g_exitdontabort = true;
   SetupWeb();
   GetStartDir();
+  AtAbort(PrintStats);
+#ifndef NDEBUG
+  AtAbort(PrintStats);
+#endif
   // Ensure utf-8 is printed correctly on windows, this method
   // has issues(http://stackoverflow.com/a/10884364/4279) but
   // should work for at least windows 7 and newer.
@@ -4022,26 +3697,6 @@ int main(int argc, char *argv[]) {
   InitMap();
   GetOpts(argc, argv);
   InitBus();
-#ifdef HAVE_JIT
-  AddPath_StartOp_Hook = AddPath_StartOp_Tui;
-#endif
-  unassert((pty = NewPty()));
-  unassert((s = NewSystem(wantmetal ? XED_MODE_REAL : XED_MODE_LONG)));
-  unassert((m = g_machine = NewMachine(s, 0)));
-#ifdef HAVE_JIT
-  if (!FLAG_wantjit || wantmetal) {
-    DisableJit(&m->system->jit);
-  }
-#endif
-  if (wantmetal) {
-    m->metal = true;
-  }
-  m->system->redraw = Redraw;
-  m->system->onbinbase = OnBinbase;
-  m->system->onlongbranch = OnLongBranch;
-  speed = 1;
-  SetXmmSize(2);
-  SetXmmDisp(kXmmHex);
 #ifndef DISABLE_OVERLAYS
   if (SetOverlays(FLAG_overlays, true)) {
     WriteErrorString("bad blink overlays spec; see log for details\n");
@@ -4054,6 +3709,30 @@ int main(int argc, char *argv[]) {
     exit(1);
   }
 #endif
+#ifdef HAVE_JIT
+  AddPath_StartOp_Hook = AddPath_StartOp_Tui;
+#endif
+  unassert((pty = NewPty()));
+  unassert((s = NewSystem(wantmetal ? XED_MACHINE_MODE_REAL
+                                    : XED_MACHINE_MODE_LONG)));
+  unassert((m = g_machine = NewMachine(s, 0)));
+#ifdef HAVE_JIT
+  if (!FLAG_wantjit || wantmetal) {
+    DisableJit(&m->system->jit);
+  }
+#endif
+  if (wantmetal) {
+    m->metal = true;
+  }
+  m->system->redraw = Redraw;
+  m->system->onbinbase = OnBinbase;
+  m->system->onlongbranch = OnLongBranch;
+#ifndef DISABLE_ROM
+  m->system->onromwriteattempt = OnRomWriteAttempt;
+#endif
+  speed = 1;
+  SetXmmSize(2);
+  SetXmmDisp(kXmmHex);
   signal(SIGPIPE, SIG_IGN);
   sigfillset(&sa.sa_mask);
   sa.sa_flags = 0;

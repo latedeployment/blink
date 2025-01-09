@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -35,10 +35,14 @@ int WriteErrorString(const char *buf) {
 
 int WriteError(int fd, const char *buf, int len) {
   int rc, cs;
+#ifdef HAVE_PTHREAD_SETCANCELSTATE
   unassert(!pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cs));
+#endif
   do rc = write(fd > 0 ? fd : g_errfd, buf, len);
   while (rc == -1 && errno == EINTR);
+#ifdef HAVE_PTHREAD_SETCANCELSTATE
   unassert(!pthread_setcancelstate(cs, 0));
+#endif
   return rc;
 }
 

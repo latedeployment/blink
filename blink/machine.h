@@ -5,6 +5,11 @@
 #include <signal.h>
 #include <stdbool.h>
 
+#ifdef __COSMOPOLITAN__
+#define _COSMO_SOURCE
+#include <libc/dce.h>
+#endif
+
 #include "blink/atomic.h"
 #include "blink/builtin.h"
 #include "blink/dll.h"
@@ -16,6 +21,7 @@
 #include "blink/thread.h"
 #include "blink/tsan.h"
 #include "blink/tunables.h"
+#include "blink/x86.h"
 
 #define kArgRde   1
 #define kArgDisp  2
@@ -226,8 +232,6 @@ struct Elf {
   char *prog;
   char *execfn;
   char *interpreter;
-  long size;
-  bool debugonce;
   i64 base;
   i64 aslr;
   u8 rng[16];
@@ -249,7 +253,7 @@ struct OpCache {
 };
 
 struct System {
-  u8 mode;
+  struct XedMachineMode mode;
   bool dlab;
   bool isfork;
   bool exited;
@@ -303,6 +307,7 @@ struct System {
   void (*onsymbols)(struct System *);
   void (*onbinbase)(struct Machine *);
   void (*onlongbranch)(struct Machine *);
+  void (*onromwriteattempt)(struct Machine *, u8 *);
   int (*exec)(char *, char *, char **, char **);
   void (*redraw)(bool);
 };
@@ -324,78 +329,78 @@ struct MachineTlb {
   u64 entry;
 };
 
-struct Machine {                         //
-  u64 ip;                                // instruction pointer
-  u8 oplen;                              // length of operation
-  u8 mode;                               // [dup] XED_MODE_{REAL,LEGACY,LONG}
-  bool threaded;                         // must use synchronization
-  _Atomic(bool) attention;               // signals main interpreter loop
-  u32 flags;                             // x86 eflags register
-  i64 stashaddr;                         // it's our page overlap buffer
-  union {                                // GENERAL REGISTER FILE
-    u64 align8_;                         //
-    u8 beg[128];                         //
-    u8 weg[16][8];                       //
-    struct {                             //
-      union {                            //
-        u8 ax[8];                        // [vol] accumulator, result:1/2
-        struct {                         //
-          u8 al;                         // lo byte of ax
-          u8 ah;                         // hi byte of ax
-        };                               //
-      };                                 //
-      union {                            //
-        u8 cx[8];                        // [vol] param:4/6
-        struct {                         //
-          u8 cl;                         // lo byte of cx
-          u8 ch;                         // hi byte of cx
-        };                               //
-      };                                 //
-      union {                            //
-        u8 dx[8];                        // [vol] param:3/6, result:2/2
-        struct {                         //
-          u8 dl;                         // lo byte of dx
-          u8 dh;                         // hi byte of dx
-        };                               //
-      };                                 //
-      union {                            //
-        u8 bx[8];                        // [sav] base index
-        struct {                         //
-          u8 bl;                         // lo byte of bx
-          u8 bh;                         // hi byte of bx
-        };                               //
-      };                                 //
-      u8 sp[8];                          // [sav] stack pointer
-      u8 bp[8];                          // [sav] backtrace pointer
-      u8 si[8];                          // [vol] param:2/6
-      u8 di[8];                          // [vol] param:1/6
-      u8 r8[8];                          // [vol] param:5/6
-      u8 r9[8];                          // [vol] param:6/6
-      u8 r10[8];                         // [vol]
-      u8 r11[8];                         // [vol]
-      u8 r12[8];                         // [sav]
-      u8 r13[8];                         // [sav]
-      u8 r14[8];                         // [sav]
-      u8 r15[8];                         // [sav]
-    };                                   //
-  };                                     //
-  _Alignas(16) u8 xmm[16][16];           // 128-BIT VECTOR REGISTER FILE
-  struct XedDecodedInst *xedd;           // ->opcache->icache if non-jit
-  i64 readaddr;                          // so tui can show memory reads
-  i64 writeaddr;                         // so tui can show memory write
-  i64 readsize;                          // bytes length of last read op
-  i64 writesize;                         // byte length of last write op
-  union {                                //
-    struct DescriptorCache seg[8];       //
-    struct {                             //
-      struct DescriptorCache es;         // xtra segment (legacy / real)
-      struct DescriptorCache cs;         // code segment (legacy / real)
-      struct DescriptorCache ss;         // stak segment (legacy / real)
-      struct DescriptorCache ds;         // data segment (legacy / real)
-      struct DescriptorCache fs;         // thred-local segment register
-      struct DescriptorCache gs;         // winple thread-local register
-    };                                   //
-  };                                     //
+struct Machine {               //
+  u64 ip;                      // instruction pointer
+  u8 oplen;                    // length of operation
+  struct XedMachineMode mode;  // [dup] XED_MACHINE_MODE_REAL etc.
+  bool threaded;               // must use synchronization
+  _Atomic(bool) attention;     // signals main interpreter loop
+  u32 flags;                   // x86 eflags register
+  i64 stashaddr;               // it's our page overlap buffer
+  union {                      // GENERAL REGISTER FILE
+    u64 align8_;               //
+    u8 beg[128];               //
+    u8 weg[16][8];             //
+    struct {                   //
+      union {                  //
+        u8 ax[8];              // [vol] accumulator, result:1/2
+        struct {               //
+          u8 al;               // lo byte of ax
+          u8 ah;               // hi byte of ax
+        };  //
+      };  //
+      union {      //
+        u8 cx[8];  // [vol] param:4/6
+        struct {   //
+          u8 cl;   // lo byte of cx
+          u8 ch;   // hi byte of cx
+        };  //
+      };  //
+      union {      //
+        u8 dx[8];  // [vol] param:3/6, result:2/2
+        struct {   //
+          u8 dl;   // lo byte of dx
+          u8 dh;   // hi byte of dx
+        };  //
+      };  //
+      union {      //
+        u8 bx[8];  // [sav] base index
+        struct {   //
+          u8 bl;   // lo byte of bx
+          u8 bh;   // hi byte of bx
+        };  //
+      };  //
+      u8 sp[8];   // [sav] stack pointer
+      u8 bp[8];   // [sav] backtrace pointer
+      u8 si[8];   // [vol] param:2/6
+      u8 di[8];   // [vol] param:1/6
+      u8 r8[8];   // [vol] param:5/6
+      u8 r9[8];   // [vol] param:6/6
+      u8 r10[8];  // [vol]
+      u8 r11[8];  // [vol]
+      u8 r12[8];  // [sav]
+      u8 r13[8];  // [sav]
+      u8 r14[8];  // [sav]
+      u8 r15[8];  // [sav]
+    };  //
+  };  //
+  _Alignas(16) u8 xmm[16][16];      // 128-BIT VECTOR REGISTER FILE
+  struct XedDecodedInst *xedd;      // ->opcache->icache if non-jit
+  i64 readaddr;                     // so tui can show memory reads
+  i64 writeaddr;                    // so tui can show memory write
+  i64 readsize;                     // bytes length of last read op
+  i64 writesize;                    // byte length of last write op
+  union {                           //
+    struct DescriptorCache seg[8];  //
+    struct {                        //
+      struct DescriptorCache es;    // xtra segment (legacy / real)
+      struct DescriptorCache cs;    // code segment (legacy / real)
+      struct DescriptorCache ss;    // stak segment (legacy / real)
+      struct DescriptorCache ds;    // data segment (legacy / real)
+      struct DescriptorCache fs;    // thred-local segment register
+      struct DescriptorCache gs;    // winple thread-local register
+    };  //
+  };  //
   struct MachineFpu fpu;                 // FLOATING-POINT REGISTER FILE
   u32 mxcsr;                             // SIMD status control register
   pthread_t thread;                      // POSIX thread of this machine
@@ -435,17 +440,17 @@ struct Machine {                         //
   struct Dll elem;                       //
   struct SmcQueue smcqueue;              //
   struct OpCache opcache[1];             //
-};                                       //
+};  //
 
 extern _Thread_local siginfo_t g_siginfo;
 extern _Thread_local struct Machine *g_machine;
 extern const nexgen32e_f kConvert[3];
 extern const nexgen32e_f kSax[3];
 
-struct System *NewSystem(int);
+struct System *NewSystem(struct XedMachineMode);
 void FreeSystem(struct System *);
 void SignalActor(struct Machine *);
-void SetMachineMode(struct Machine *, int);
+void SetMachineMode(struct Machine *, struct XedMachineMode);
 struct Machine *NewMachine(struct System *, struct Machine *);
 i64 AreAllPagesUnlocked(struct System *) nosideeffect;
 bool IsOrphan(struct Machine *) nosideeffect;
@@ -460,7 +465,6 @@ void ResetCpu(struct Machine *);
 void ResetTlb(struct Machine *);
 void CollectGarbage(struct Machine *, size_t);
 void ResetInstructionCache(struct Machine *);
-void GeneralDispatch(P);
 nexgen32e_f GetOp(long);
 void LoadInstruction(struct Machine *, u64);
 int LoadInstruction2(struct Machine *, u64);
@@ -482,7 +486,7 @@ _Noreturn void ThrowSegmentationFault(struct Machine *, i64);
 _Noreturn void ThrowProtectionFault(struct Machine *);
 _Noreturn void OpUdImpl(struct Machine *);
 _Noreturn void OpUd(P);
-_Noreturn void OpHlt(P);
+void OpHlt(P);
 void JitlessDispatch(P);
 void RestoreIp(struct Machine *);
 void CheckForSignals(struct Machine *);
@@ -511,6 +515,7 @@ bool HasPageLock(const struct Machine *, i64) nosideeffect;
 void CollectPageLocks(struct Machine *);
 u8 *LookupAddress(struct Machine *, i64);
 u8 *LookupAddress2(struct Machine *, i64, u64, u64);
+u8 *SpyAddress(struct Machine *, i64);
 u8 *Load(struct Machine *, i64, size_t, u8 *);
 u8 *MallocPage(void);
 u8 *RealAddress(struct Machine *, i64);
@@ -557,7 +562,7 @@ void FastCallAbs(u64, struct Machine *);
 void FastJmp(struct Machine *, u64);
 void FastJmpAbs(u64, struct Machine *);
 void FastLeave(struct Machine *);
-void FastRet(struct Machine *);
+i64 PredictRet(struct Machine *, i64);
 
 typedef void (*putreg64_f)(u64, struct Machine *);
 extern const putreg64_f kPutReg64[16];
@@ -589,6 +594,7 @@ void OpAluwi(P);
 void OpCallEq(P);
 void OpCallJvds(P);
 void OpCallf(P);
+void OpCallfEq(P);
 void OpCmpxchgEbAlGb(P);
 void OpCmpxchgEvqpRaxGvqp(P);
 void OpCpuid(P);
@@ -605,6 +611,7 @@ void OpDivAlAhAxEbSigned(P);
 void OpDivAlAhAxEbUnsigned(P);
 void OpDivRdxRaxEvqpSigned(P);
 void OpDivRdxRaxEvqpUnsigned(P);
+void OpEnter(P);
 void OpImulGvqpEvqp(P);
 void OpImulGvqpEvqpImm(P);
 void OpIncEvqp(P);
@@ -650,6 +657,7 @@ u64 AddressDi(P);
 i64 AddressSi(P);
 u64 GetSegmentBase(P, unsigned);
 void SetCs(P, u16);
+void LongBranch(P, u16, u64);
 i64 DataSegment(P, u64);
 i64 AddSegment(P, u64, u64);
 
@@ -704,7 +712,12 @@ void OpIncZv(P);
 void OpDecZv(P);
 void OpLes(P);
 void OpLds(P);
+void OpLss(P);
+void OpLfs(P);
+void OpLgs(P);
 void OpJmpf(P);
+void OpJmpfEq(P);
+void OpClts(P);
 void OpRdmsr(P);
 void OpWrmsr(P);
 void OpMovRqCq(P);
@@ -748,8 +761,6 @@ void OpTest(P);
 void OpAlui(P);
 void LoadAluArgs(P);
 void LoadAluFlipArgs(P);
-i64 FastAnd8(struct Machine *, u64, u64);
-i64 FastSub8(struct Machine *, u64, u64);
 void ZeroRegFlags(struct Machine *, long);
 
 i32 Imul32(i32, i32, struct Machine *);
@@ -801,7 +812,9 @@ void LogCodOp(struct Machine *, const char *);
 #endif
 
 MICRO_OP_SAFE u8 Cpl(struct Machine *m) {
-  return m->cs.sel & 3u;
+  return !m->metal                              ? 3u
+         : m->mode.genmode != XED_GEN_MODE_REAL ? (m->cs.sel & 3u)
+                                                : 0u;
 }
 
 #define BEGIN_NO_PAGE_FAULTS \

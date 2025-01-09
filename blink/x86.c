@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2018 Intel Corporation                                             │
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
@@ -16,6 +16,8 @@
 │ See the License for the specific language governing permissions and          │
 │ limitations under the License.                                               │
 ╚─────────────────────────────────────────────────────────────────────────────*/
+#include "blink/x86.h"
+
 #include <stdbool.h>
 #include <string.h>
 
@@ -27,7 +29,6 @@
 #include "blink/modrm.h"
 #include "blink/rde.h"
 #include "blink/types.h"
-#include "blink/x86.h"
 
 const char kXedCopyright[] = "\
 Xed (Apache 2.0)\n\
@@ -260,7 +261,8 @@ static int xed_set_imm_bytes(struct XedDecodedInst *x, int *imm_width,
             x->op.rde)][Osz(x->op.rde)][Mode(x->op.rde)]];
         return XED_ERROR_NONE;
       case 11:
-        *imm_width = xed_bytes2bits(2);
+        // actually 2 bytes for uimm0 & 1 byte for uimm1
+        *imm_width = xed_bytes2bits(3);
         return XED_ERROR_NONE;
       case 12:
         if (Osz(x->op.rde) || Rep(x->op.rde) == 2) {
@@ -768,8 +770,20 @@ int DecodeInstruction(struct XedDecodedInst *x, const void *itext, size_t bytes,
   }
   rc = xed_decode_instruction_length(x);
   rde = x->op.rde;
-  rde |= (Opcode(rde) & 7) << 12;            // srm
-  rde ^= (Mode(rde) == XED_MODE_REAL) << 5;  // osz ^= real
+  rde |= (Opcode(rde) & 7) << 12;  // srm
+  if (Mode(rde) == XED_MODE_REAL) {
+    // in 16-bit mode, flip osz, except for SIMD instructions & cmpxchg8b;
+    // for SIMD instructions, 0x66 always refers to instructions with larger
+    // operands, & lack of 0x66 to instructions with smaller operands
+    u16 mop = Mopcode(rde);
+    if ((mop >= 0x150 && mop <= 0x176) || (mop >= 0x17C && mop <= 0x17F) ||
+        mop == 0x1C2 || (mop >= 0x1C4 && mop <= 0x1C7) ||
+        (mop >= 0x1D0 && mop <= 0x1FE)) {
+      (void)rde;
+    } else {
+      rde ^= 1 << 5;
+    }
+  }
   rde |= (u32)kLog2[IsByteOp(rde)][Osz(rde)][Rexw(rde)] << 28;
   rde |= (u64)kLog2[0][Osz(rde)][Rexw(rde)] << 57;  // wordlog2
   rde |= (u32)kXed.eamode[Asz(rde)][Mode(rde)] << 24;

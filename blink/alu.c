@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -17,6 +17,7 @@
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
 #include "blink/alu.h"
+
 #include "blink/endian.h"
 #include "blink/flags.h"
 #include "blink/log.h"
@@ -79,7 +80,7 @@ i64 Sub8(struct Machine *m, u64 x64, u64 y64) {
   z = x - y;
   cf = x < z;
   af = (x & 15) < (z & 15);
-  of = ((z ^ x) & (x ^ y)) >> 7;
+  of = ((x ^ y) & (z ^ x)) >> 7;
   return AluFlags8(m, z, af, of, cf);
 }
 
@@ -119,7 +120,7 @@ i64 Sub32(struct Machine *m, u64 x64, u64 y64) {
   z = x - y;
   cf = x < z;
   af = (x & 15) < (z & 15);
-  of = ((z ^ x) & (x ^ y)) >> 31;
+  of = ((x ^ y) & (z ^ x)) >> 31;
   return AluFlags32(m, z, af, of, cf);
 }
 
@@ -157,7 +158,7 @@ i64 Sub64(struct Machine *m, u64 x, u64 y) {
   z = x - y;
   cf = x < z;
   af = (x & 15) < (z & 15);
-  of = ((z ^ x) & (x ^ y)) >> 63;
+  of = ((x ^ y) & (z ^ x)) >> 63;
   return AluFlags64(m, z, af, of, cf);
 }
 
@@ -627,7 +628,7 @@ i64 Sub16(struct Machine *m, u64 x64, u64 y64) {
   z = x - y;
   cf = x < z;
   af = (x & 15) < (z & 15);
-  of = ((z ^ x) & (x ^ y)) >> 15;
+  of = ((x ^ y) & (z ^ x)) >> 15;
   return AluFlags16(m, z, af, of, cf);
 }
 

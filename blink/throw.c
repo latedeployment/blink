@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -17,6 +17,7 @@
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
 #include <inttypes.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,6 +26,7 @@
 #include "blink/assert.h"
 #include "blink/debug.h"
 #include "blink/endian.h"
+#include "blink/flags.h"
 #include "blink/linux.h"
 #include "blink/log.h"
 #include "blink/machine.h"
@@ -73,7 +75,6 @@ void HaltMachine(struct Machine *m, int code) {
       DeliverSignalToUser(m, SIGFPE_LINUX, FPE_FLTINV_LINUX);
       break;
     case kMachineHalt:
-      // TODO(jart): We should do something for real mode.
     case kMachineDecodeError:
     case kMachineUndefinedInstruction:
       RestoreIp(m);
@@ -95,12 +96,20 @@ void HaltMachine(struct Machine *m, int code) {
       m->faultaddr = m->ip - m->oplen;
       DeliverSignalToUser(m, SIGTRAP_LINUX, SI_KERNEL_LINUX);
       break;
+    case 4:
+      m->faultaddr = 0;
+      DeliverSignalToUser(m, SIGSEGV_LINUX, SI_KERNEL_LINUX);
+      break;
     case kMachineExitTrap:
       RestoreIp(m);
       break;
     default:
-      if (code > 0) {
-        break;
+      if (code >= 0) {
+        if (!m->metal) {
+          RestoreIp(m);
+          m->faultaddr = 0;
+          DeliverSignalToUser(m, SIGSEGV_LINUX, SI_KERNEL_LINUX);
+        }
       } else {
         unassert(!"not possible");
       }
@@ -133,5 +142,9 @@ void OpUd(P) {
 }
 
 void OpHlt(P) {
-  HaltMachine(m, kMachineHalt);
+  if (Cpl(m) == 0 && GetFlag(m->flags, FLAGS_IF)) {
+    sched_yield();
+  } else {
+    HaltMachine(m, kMachineHalt);
+  }
 }

@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -16,6 +16,8 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
+#include "blink/syscall.h"
+
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -35,7 +37,6 @@
 #include <sys/file.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
-#include <sys/mount.h>
 #include <sys/param.h>
 #include <sys/resource.h>
 #include <sys/select.h>
@@ -76,7 +77,6 @@
 #include "blink/stats.h"
 #include "blink/strace.h"
 #include "blink/swap.h"
-#include "blink/syscall.h"
 #include "blink/thread.h"
 #include "blink/timespec.h"
 #include "blink/util.h"
@@ -102,6 +102,10 @@
 
 #ifdef HAVE_EPOLL_PWAIT1
 #include <sys/epoll.h>
+#endif
+
+#ifdef HAVE_SYS_MOUNT_H
+#include <sys/mount.h>
 #endif
 
 #ifdef SO_LINGER_SEC
@@ -216,18 +220,10 @@ const char *GetDirFildesPath(struct System *s, int fildes) {
   return 0;
 }
 
-void SignalActor(struct Machine *mm) {
-#ifdef __CYGWIN__
-  // TODO: Why does JIT clobber %rbx on Cygwin?
-  struct Machine *volatile m = mm;
-#else
-  struct Machine *m = mm;
-#endif
+void SignalActor(struct Machine *m) {
   for (;;) {
-#ifndef __CYGWIN__
     STATISTIC(++interps);
-#endif
-    ExecuteInstruction(m);
+    JitlessDispatch(DISPATCH_NOTHING);
     if (atomic_load_explicit(&m->attention, memory_order_acquire)) {
       if (m->restored) break;
       CheckForSignals(m);
@@ -355,18 +351,21 @@ static void ClearChildTid(struct Machine *m) {
 
 _Noreturn void SysExitGroup(struct Machine *m, int rc) {
   THR_LOGF("pid=%d tid=%d SysExitGroup", m->system->pid, m->tid);
-#ifndef NDEBUG
-  if (FLAG_statistics) {
-    PrintStats();
-  }
-#endif
   ClearChildTid(m);
   if (m->system->isfork) {
+#ifndef NDEBUG
+    if (FLAG_statistics) {
+      PrintStats();
+    }
+#endif
     THR_LOGF("calling _Exit(%d)", rc);
     _Exit(rc);
   } else {
     THR_LOGF("calling exit(%d)", rc);
     KillOtherThreads(m->system);
+#ifdef HAVE_JIT
+    DisableJit(&m->system->jit);  // unmapping exec pages is slow
+#endif
     if (m->system->trapexit && !m->system->exited) {
       m->system->exited = true;
       m->system->exitcode = rc;
@@ -375,6 +374,11 @@ _Noreturn void SysExitGroup(struct Machine *m, int rc) {
     FreeMachine(m);
 #ifdef HAVE_JIT
     ShutdownJit();
+#endif
+#ifndef NDEBUG
+    if (FLAG_statistics) {
+      PrintStats();
+    }
 #endif
     exit(rc);
   }
@@ -405,36 +409,40 @@ static int Fork(struct Machine *m, u64 flags, u64 stack, u64 ctid) {
   // exec_lock must come before fds.lock (see execve)
   // mmap_lock must come before fds.lock (see GetOflags)
   // mmap_lock must come before pagelocks_lock (see FreePage)
-  LOCK(&m->system->exec_lock);
-  LOCK(&m->system->sig_lock);
-  LOCK(&m->system->mmap_lock);
-  LOCK(&m->system->pagelocks_lock);
-  LOCK(&m->system->fds.lock);
-  LOCK(&m->system->machines_lock);
+  if (m->threaded) {
+    LOCK(&m->system->exec_lock);
+    LOCK(&m->system->sig_lock);
+    LOCK(&m->system->mmap_lock);
+    LOCK(&m->system->pagelocks_lock);
+    LOCK(&m->system->fds.lock);
+    LOCK(&m->system->machines_lock);
 #ifndef HAVE_PTHREAD_PROCESS_SHARED
-  LOCK(&g_bus->futexes.lock);
+    LOCK(&g_bus->futexes.lock);
 #endif
 #ifdef HAVE_JIT
-  LOCK(&m->system->jit.lock);
+    LOCK(&m->system->jit.lock);
 #endif
+  }
   pid = fork();
 #ifdef __HAIKU__
   // haiku wipes tls after fork() in child
   // https://dev.haiku-os.org/ticket/17896
   if (!pid) g_machine = m;
 #endif
+  if (m->threaded) {
 #ifdef HAVE_JIT
-  UNLOCK(&m->system->jit.lock);
+    UNLOCK(&m->system->jit.lock);
 #endif
 #ifndef HAVE_PTHREAD_PROCESS_SHARED
-  UNLOCK(&g_bus->futexes.lock);
+    UNLOCK(&g_bus->futexes.lock);
 #endif
-  UNLOCK(&m->system->machines_lock);
-  UNLOCK(&m->system->fds.lock);
-  UNLOCK(&m->system->pagelocks_lock);
-  UNLOCK(&m->system->mmap_lock);
-  UNLOCK(&m->system->sig_lock);
-  UNLOCK(&m->system->exec_lock);
+    UNLOCK(&m->system->machines_lock);
+    UNLOCK(&m->system->fds.lock);
+    UNLOCK(&m->system->pagelocks_lock);
+    UNLOCK(&m->system->mmap_lock);
+    UNLOCK(&m->system->sig_lock);
+    UNLOCK(&m->system->exec_lock);
+  }
   if (!pid) {
     newpid = getpid();
     if (stack) {
@@ -530,9 +538,11 @@ static int SysSpawn(struct Machine *m, u64 flags, u64 stack, u64 ptid, u64 ctid,
   }
   if (((flags & CLONE_PARENT_SETTID_LINUX) &&
        ((ptid & (sizeof(int) - 1)) ||
+        !IsValidMemory(m, ptid, 4, PROT_READ | PROT_WRITE) ||
         !(ptid_ptr = (_Atomic(int) *)LookupAddress(m, ptid)))) ||
       ((flags & CLONE_CHILD_SETTID_LINUX) &&
        ((ctid & (sizeof(int) - 1)) ||
+        !IsValidMemory(m, ctid, 4, PROT_READ | PROT_WRITE) ||
         !(ctid_ptr = (_Atomic(int) *)LookupAddress(m, ctid))))) {
     LOGF("bad clone() ptid / ctid pointers: %#" PRIx64, flags);
     return efault();
@@ -1048,7 +1058,7 @@ static u64 Prot2Page(int prot) {
   u64 key = 0;
   if (prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC)) return einval();
   if (prot & PROT_READ) key |= PAGE_U;
-  if (prot & PROT_WRITE) key |= PAGE_RW;
+  if (prot & PROT_WRITE) key |= PAGE_RW | PAGE_U;
   if (~prot & PROT_EXEC) key |= PAGE_XD;
   return key;
 }
@@ -2815,13 +2825,13 @@ static int XlatFstatatFlags(int x) {
     res |= AT_SYMLINK_NOFOLLOW;
     x &= ~AT_SYMLINK_NOFOLLOW_LINUX;
   }
-#ifdef AT_EMPTY_PATH
 #ifndef DISABLE_NONPOSIX
-  if (x & AT_EMPTY_PATH_LINUX) {
-    res |= AT_EMPTY_PATH;
-    x &= ~AT_EMPTY_PATH_LINUX;
-  }
+  if (x & AT_NO_AUTOMOUNT_LINUX) {
+#if defined(AT_NO_AUTOMOUNT) && defined(DISABLE_VFS)
+    res |= AT_NO_AUTOMOUNT;
 #endif
+    x &= ~AT_NO_AUTOMOUNT_LINUX;
+  }
 #endif
   if (x) {
     LOGF("%s() flags %d not supported", "fstatat", x);
@@ -2837,10 +2847,9 @@ static int SysFstatat(struct Machine *m, i32 dirfd, i64 pathaddr, i64 staddr,
   const char *path;
   struct stat_linux gst;
   if (!(path = LoadStr(m, pathaddr))) return -1;
-#ifndef AT_EMPTY_PATH
 #ifndef DISABLE_NONPOSIX
   if (flags & AT_EMPTY_PATH_LINUX) {
-    flags &= AT_EMPTY_PATH_LINUX;
+    flags &= ~AT_EMPTY_PATH_LINUX;
     if (!*path) {
       if (flags) {
         LOGF("%s() flags %d not supported", "fstatat(AT_EMPTY_PATH)", flags);
@@ -2849,7 +2858,6 @@ static int SysFstatat(struct Machine *m, i32 dirfd, i64 pathaddr, i64 staddr,
       return SysFstat(m, dirfd, staddr);
     }
   }
-#endif
 #endif
   if ((rc = VfsStat(GetDirFildes(dirfd), path, &st, XlatFstatatFlags(flags))) !=
       -1) {
@@ -2891,7 +2899,6 @@ static int SysFchownat(struct Machine *m, i32 dirfd, i64 pathaddr, u32 uid,
                        u32 gid, i32 flags) {
   const char *path;
   if (!(path = LoadStr(m, pathaddr))) return -1;
-#ifndef AT_EMPTY_PATH
 #ifndef DISABLE_NONPOSIX
   if (flags & AT_EMPTY_PATH_LINUX) {
     flags &= AT_EMPTY_PATH_LINUX;
@@ -2903,7 +2910,6 @@ static int SysFchownat(struct Machine *m, i32 dirfd, i64 pathaddr, u32 uid,
       return SysFchown(m, dirfd, uid, gid);
     }
   }
-#endif
 #endif
   return VfsChown(GetDirFildes(dirfd), path, uid, gid,
                   XlatFchownatFlags(flags));
@@ -2933,7 +2939,7 @@ static int SysMount(struct Machine *m, i64 source, i64 target, i64 fstype,
                     i64 mountflags, i64 data) {
   // No xlat, the VFS system will handle raw Linux options.
   return VfsMount(LoadStr(m, source), LoadStr(m, target), LoadStr(m, fstype),
-                  mountflags, (void *)data);
+                  mountflags, (void *)(uintptr_t)data);
 }
 #endif
 
@@ -4665,7 +4671,7 @@ static int Poll(struct Machine *m, i64 fdsaddr, u64 nfds,
   struct pollfd_linux *gfds;
   struct timespec now, wait, remain;
   int (*poll_impl)(struct pollfd *, nfds_t, int);
-  if (!CheckedMul(nfds, sizeof(struct pollfd_linux), &gfdssize) &&
+  if (!ckd_mul(&gfdssize, nfds, sizeof(struct pollfd_linux)) &&
       gfdssize <= 0x7ffff000) {
     if ((gfds = (struct pollfd_linux *)AddToFreeList(m, malloc(gfdssize)))) {
       rc = 0;
@@ -5369,7 +5375,7 @@ static i32 EpollPwait(struct Machine *m, i32 epfd, i64 eventsaddr,
       } else {
         waitfor = GetZeroTime();
       }
-#ifdef HAVE_EPOLL_PWAIT2
+#if defined(HAVE_EPOLL_PWAIT2) && !defined(MUSL_CROSS_MAKE)
       rc = epoll_pwait2(epfd, events, maxevents, &waitfor, &oldmask);
 #else
       rc = epoll_pwait(epfd, events, maxevents,
@@ -5520,7 +5526,7 @@ void OpSyscall(P) {
     SYSCALL(0, 0x027, "getpid", SysGetpid, STRACE_GETPID);
     SYSCALL(0, 0x0BA, "gettid", SysGettid, STRACE_GETTID);
     SYSCALL(1, 0x03F, "uname", SysUname, STRACE_1);
-    SYSCALL(3, 0x048, "fcntl", SysFcntl, STRACE_3);
+    SYSCALL(3, 0x048, "fcntl", SysFcntl, STRACE_FCNTL);
     SYSCALL(2, 0x049, "flock", SysFlock, STRACE_2);
     SYSCALL(1, 0x04A, "fsync", SysFsync, STRACE_FSYNC);
     SYSCALL(1, 0x04B, "fdatasync", SysFdatasync, STRACE_FDATASYNC);

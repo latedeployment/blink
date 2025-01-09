@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2023 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -126,7 +126,7 @@ bool FuseBranchTest(P) {
 #error "architecture not implemented"
 #endif
   AppendJit(m->path.jb, code, sizeof(code));
-  Connect(A, m->ip + jlen, false);
+  Connect(A, m->ip + jlen, true);
   Jitter(A,
          "a1i"  // arg1 = disp
          "m"    // call micro-op
@@ -324,7 +324,7 @@ bool FuseBranchCmp(P, bool imm) {
 #error "architecture not implemented"
 #endif
   AppendJit(m->path.jb, code, sizeof(code));
-  Connect(A, m->ip + jlen, false);
+  Connect(A, m->ip + jlen, true);
   Jitter(A,
          "a1i"  // arg1 = disp
          "m"    // call micro-op

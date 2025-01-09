@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -149,8 +149,9 @@ static void FreeHostPages(struct System *s) {
     unassert(!s->rss);
 #endif
     s->cr3 = 0;
+  } else if (s->real) {
+    Munmap(s->real, ROUNDUP(kRealSize, FLAG_pagesize));
   }
-  free(s->real);
   s->real = 0;
 }
 
@@ -189,24 +190,32 @@ long GetMaxRss(struct System *s) {
   return MIN(kMaxResident, Read64(s->rlim[RLIMIT_AS_LINUX].cur)) / 4096;
 }
 
-struct System *NewSystem(int mode) {
+struct System *NewSystem(struct XedMachineMode mode) {
   long i;
   struct System *s;
-  unassert(mode == XED_MODE_REAL ||    //
-           mode == XED_MODE_LEGACY ||  //
-           mode == XED_MODE_LONG);
+  unassert(mode.omode == XED_MODE_REAL ||    //
+           mode.omode == XED_MODE_LEGACY ||  //
+           mode.omode == XED_MODE_LONG);
+  unassert(mode.genmode == XED_GEN_MODE_REAL ||  //
+           mode.genmode == XED_GEN_MODE_PROTECTED);
   if (posix_memalign((void **)&s, _Alignof(struct System), sizeof(*s))) {
     enomem();
     return 0;
   }
   memset(s, 0, sizeof(*s));
   s->mode = mode;
-  if (s->mode == XED_MODE_REAL) {
-    if (posix_memalign((void **)&s->real, 4096, kRealSize)) {
+  if (s->mode.omode == XED_MODE_REAL) {
+    u8 *real =
+        Mmap(NULL, ROUNDUP(kRealSize, FLAG_pagesize), PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANONYMOUS_, -1, 0, "real");
+    if (!real) {
       free(s);
       enomem();
       return 0;
     }
+    s->real = real;
+    s->gdt_limit = s->idt_limit = 0xFFFF;
+    s->gdt_base = s->idt_base = 0;
   }
 #ifdef HAVE_JIT
   InitJit(&s->jit, (uintptr_t)JitlessDispatch);
@@ -332,7 +341,8 @@ void FreeSystem(struct System *s) {
   unassert(!pthread_cond_destroy(&s->pagelocks_cond));
   unassert(!pthread_mutex_destroy(&s->exec_lock));
   unassert(!pthread_mutex_destroy(&s->mmap_lock));
-  unassert(!pthread_mutex_destroy(&s->sig_lock));
+  // TODO(jart): Figure out why sig_lock sometimes fails to destroy
+  (void)pthread_mutex_destroy(&s->sig_lock);
   free(s->elf.interpreter);
   DestroyFds(&s->fds);
   free(s->elf.execfn);
@@ -474,7 +484,6 @@ bool IsValidAddrSize(i64 virt, i64 size) {
 }
 
 void InvalidateSystem(struct System *s, bool tlb, bool icache) {
-#ifdef HAVE_THREADS
   struct Dll *e;
   struct Machine *m;
   if (tlb || icache) {
@@ -491,7 +500,6 @@ void InvalidateSystem(struct System *s, bool tlb, bool icache) {
     }
     UNLOCK(&s->machines_lock);
   }
-#endif
 }
 
 struct FileMap *AddFileMap(struct System *s, i64 virt, i64 size,
@@ -785,7 +793,7 @@ i64 ReserveVirtual(struct System *s, i64 virt, i64 size, u64 flags, int fd,
   unassert(!(flags & PAGE_MAP));
   unassert(!(flags & PAGE_HOST));
   unassert(!(flags & PAGE_RSRV));
-  unassert(s->mode == XED_MODE_LONG);
+  unassert(s->mode.omode == XED_MODE_LONG);
 
   // determine memory protection
   prot = GetProtection(flags);
@@ -1382,6 +1390,10 @@ i64 ConvertHostToGuestAddress(struct System *s, void *ha, u64 *out_pte) {
   i64 g48;
   uintptr_t base;
   if (out_pte) *out_pte = 0;
+  if (s->mode.omode != XED_MODE_LONG &&
+      (!(s->cr0 & CR0_PG) || s->mode.genmode == XED_GEN_MODE_REAL)) {
+    return (uintptr_t)ha;
+  }
   if ((uintptr_t)ha < kNullSize) return (uintptr_t)ha;
   if (HasLinearMapping() && !out_pte) return ToGuest(ha);
   base = (uintptr_t)ha & -4096;

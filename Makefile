@@ -1,5 +1,5 @@
 #-*-mode:makefile-gmake;indent-tabs-mode:t;tab-width:8;coding:utf-8-*-┐
-#───vi: set et ft=make ts=8 tw=8 fenc=utf-8 :vi───────────────────────┘
+#── vi: set et ft=make ts=8 tw=8 fenc=utf-8 :vi ──────────────────────┘
 
 SHELL = /bin/sh
 MAKEFLAGS += --no-builtin-rules
@@ -8,7 +8,7 @@ ARCHITECTURES = x86_64 x86_64-gcc49 i486 aarch64 arm mips s390x mipsel mips64 mi
 .SUFFIXES:
 .DELETE_ON_ERROR:
 .FEATURES: output-sync
-.PHONY: o all clean check check2 test tags install
+.PHONY: o all clean check check2 test tags format install
 
 ifeq ($(MAKE_VERSION), 3.81)
 $(error please "brew install make" and use the "gmake" command)
@@ -66,9 +66,14 @@ o/ok:	o/$(MODE)/blink
 test:	o/$(MODE)/blink				\
 	o/$(MODE)/test
 
+format:
+	clang-format -i -style=file blink/*.c blink/*.h
+
 check:	test					\
 	o/$(MODE)/third_party/cosmo		\
-	o/$(MODE)/third_party/libc-test
+	o/$(MODE)/third_party/libc-test		\
+	o/$(MODE)/test/metal			\
+	o/$(MODE)/test/metalrom
 
 check2:	o/$(MODE)/test/sse			\
 	o/$(MODE)/test/lib			\
@@ -82,7 +87,6 @@ check2:	o/$(MODE)/test/sse			\
 emulates:					\
 	o/$(MODE)/test/asm			\
 	o/$(MODE)/test/flat			\
-	o/$(MODE)/test/metal			\
 	o/$(MODE)/third_party/ltp/medium	\
 	o/$(MODE)/third_party/cosmo/emulates
 
@@ -98,6 +102,7 @@ include test/func/func.mk
 include test/flat/flat.mk
 include test/blink/test.mk
 include test/metal/metal.mk
+include test/metalrom/metalrom.mk
 include tool/config/config.mk
 include third_party/gcc/gcc.mk
 include third_party/ltp/ltp.mk
@@ -106,8 +111,8 @@ include third_party/qemu/qemu.mk
 include third_party/cosmo/cosmo.mk
 include third_party/libc-test/libc-test.mk
 
-BUILD_TOOLCHAIN := -DBUILD_TOOLCHAIN="\"$(shell $(CC) --version | head -n1)\""
-BUILD_TIMESTAMP := -DBUILD_TIMESTAMP="\"$(shell LC_ALL=C TZ=UTC date +"%a %b %e %T %Z %Y")\""
+BUILD_TOOLCHAIN := -DBUILD_TOOLCHAIN="\"$(shell $(CC) --version | head -n1 | sed s/\ / /g)\""
+BUILD_TIMESTAMP := -DBUILD_TIMESTAMP="\"$(shell LC_ALL=C TZ=UTC date +"%a %b %e %T %Z %Y" | sed s/\ / /g)\""
 BLINK_COMMITS := -DBLINK_COMMITS="\"$(shell git rev-list HEAD --count 2>/dev/null)\""
 BLINK_GITSHA := -DBLINK_GITSHA="\"$(shell git rev-parse --verify HEAD 2>/dev/null)\""
 

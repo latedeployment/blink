@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2023 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -16,6 +16,8 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
+#include <string.h>
+
 #include "blink/bus.h"
 #include "blink/endian.h"
 #include "blink/machine.h"
@@ -38,8 +40,10 @@ static relegated u64 GetDescriptorBase(u64 d) {
   return (d & 0xff00000000000000) >> 32 | (d & 0x000000ffffff0000) >> 16;
 }
 
-static relegated int GetDescriptorMode(u64 d) {
-  u8 kMode[] = {XED_MODE_REAL, XED_MODE_LONG, XED_MODE_LEGACY, XED_MODE_LONG};
+static struct XedMachineMode GetDescriptorMode(u64 d) {
+  static const struct XedMachineMode kMode[] = {
+      XED_MACHINE_MODE_LEGACY_16, XED_MACHINE_MODE_LONG,
+      XED_MACHINE_MODE_LEGACY_32, XED_MACHINE_MODE_LONG};
   return kMode[(d & 0x0060000000000000) >> 53];
 }
 
@@ -51,12 +55,13 @@ static relegated bool IsNullSelector(u16 sel) {
   return (sel & -4u) == 0;
 }
 
-static relegated void ChangeMachineMode(struct Machine *m, int mode) {
-  if (mode == m->mode) return;
+static relegated void ChangeMachineMode(struct Machine *m,
+                                        struct XedMachineMode mode) {
+  if (memcmp(&mode, &m->mode, sizeof(mode)) == 0) return;
   ResetInstructionCache(m);
   SetMachineMode(m, mode);
 #ifdef HAVE_JIT
-  if (mode == XED_MODE_LONG && FLAG_wantjit) {
+  if (mode.omode == XED_MODE_LONG && FLAG_wantjit) {
     EnableJit(&m->system->jit);
   }
 #endif
@@ -64,7 +69,7 @@ static relegated void ChangeMachineMode(struct Machine *m, int mode) {
 
 static relegated void SetSegment(P, unsigned sr, u16 sel, bool jumping) {
   u64 descriptor;
-  if (sr == 1 && !jumping) OpUdImpl(m);
+  if (sr == SREG_CS && !jumping) OpUdImpl(m);
   if (!IsProtectedMode(m)) {
     m->seg[sr].sel = sel;
     m->seg[sr].base = sel << 4;
@@ -92,6 +97,15 @@ relegated void SetCs(P, u16 sel) {
   SetSegment(A, SREG_CS, sel, true);
 }
 
+relegated void LongBranch(P, u16 sel, u64 ip) {
+  SetCs(A, sel);
+  m->ip = ip;
+  m->oplen = 0;
+  if (m->system->onlongbranch) {
+    m->system->onlongbranch(m);
+  }
+}
+
 relegated void OpPushSeg(P) {
   u8 seg = (Opcode(rde) & 070) >> 3;
   Push(A, GetSegment(A, seg)->sel);
@@ -114,11 +128,7 @@ relegated void OpMovSwEvqp(P) {
 }
 
 relegated void OpJmpf(P) {
-  SetCs(A, uimm0);
-  m->ip = disp;
-  if (m->system->onlongbranch) {
-    m->system->onlongbranch(m);
-  }
+  LongBranch(A, uimm0, disp);
 }
 
 static void PutEaxAx(P, u32 x) {
@@ -169,15 +179,15 @@ relegated void OpOutDxAx(P) {
   OpOut(m, Get16(m->dx), GetEaxAx(A));
 }
 
-static relegated void LoadFarPointer(P, unsigned sr) {
+static relegated void LoadFarPointer(P, unsigned sr, bool jumping) {
   unsigned n;
   u8 *p;
   u64 fp;
   switch (Eamode(rde)) {
     case XED_MODE_LONG:
-    case XED_MODE_LEGACY:
       OpUdImpl(m);
       break;
+    case XED_MODE_LEGACY:
     case XED_MODE_REAL:
       n = 1 << WordLog2(rde);
       p = ComputeReserveAddressRead(A, n + 2);
@@ -185,12 +195,22 @@ static relegated void LoadFarPointer(P, unsigned sr) {
       fp = Load32(p);
       if (n >= 4) {
         fp |= (u64)Load16(p + 4) << 32;
-        SetSegment(A, sr, fp >> 32 & 0x0000ffff, false);
+        SetSegment(A, sr, fp >> 32 & 0x0000ffff, jumping);
+        fp &= 0xffffffff;
       } else {
-        SetSegment(A, sr, fp >> 16 & 0x0000ffff, false);
+        SetSegment(A, sr, fp >> 16 & 0x0000ffff, jumping);
+        fp &= 0x0000ffff;
       }
       UnlockBus(p);
-      WriteRegister(rde, RegRexrReg(m, rde), fp);  // offset portion
+      if (!jumping) {
+        WriteRegister(rde, RegRexrReg(m, rde), fp);  // offset portion
+      } else {
+        m->ip = fp;
+        m->oplen = 0;
+        if (m->system->onlongbranch) {
+          m->system->onlongbranch(m);
+        }
+      }
       break;
     default:
       __builtin_unreachable();
@@ -198,11 +218,41 @@ static relegated void LoadFarPointer(P, unsigned sr) {
 }
 
 relegated void OpLes(P) {
-  LoadFarPointer(A, 0);
+  LoadFarPointer(A, SREG_ES, false);
 }
 
 relegated void OpLds(P) {
-  LoadFarPointer(A, 3);
+  LoadFarPointer(A, SREG_DS, false);
+}
+
+relegated void OpLss(P) {
+  LoadFarPointer(A, SREG_SS, false);
+}
+
+relegated void OpLfs(P) {
+  LoadFarPointer(A, SREG_FS, false);
+}
+
+relegated void OpLgs(P) {
+  LoadFarPointer(A, SREG_GS, false);
+}
+
+relegated void OpJmpfEq(P) {
+  LoadFarPointer(A, SREG_CS, true);
+}
+
+relegated void OpCallfEq(P) {
+  Push(A, m->cs.sel);
+  Push(A, m->ip);
+  LoadFarPointer(A, SREG_CS, true);
+}
+
+relegated void OpClts(P) {
+  if (Cpl(m)) {
+    ThrowProtectionFault(m);
+  } else {
+    m->system->cr0 &= ~(u64)CR0_TS;
+  }
 }
 
 relegated void OpWrmsr(P) {
@@ -261,9 +311,18 @@ relegated void OpMovRqCq(P) {
 }
 
 relegated void OpMovCqRq(P) {
+  u64 cr0;
+  struct XedMachineMode mode;
   switch (ModrmReg(rde)) {
     case 0:
-      m->system->cr0 = Get64(RegRexbRm(m, rde));
+      m->system->cr0 = cr0 = Get64(RegRexbRm(m, rde));
+      mode = m->system->mode;
+      if ((cr0 & CR0_PE)) {
+        mode.genmode = XED_GEN_MODE_PROTECTED;
+      } else {
+        mode.genmode = XED_GEN_MODE_REAL;
+      }
+      ChangeMachineMode(m, mode);
       break;
     case 2:
       m->system->cr2 = Get64(RegRexbRm(m, rde));

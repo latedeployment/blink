@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -16,8 +16,9 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
-#include "blink/log.h"
 #include "blink/stats.h"
+
+#include "blink/log.h"
 
 #define DEFINE_AVERAGE(S) struct Average S;
 #define DEFINE_COUNTER(S) long S;
@@ -25,11 +26,11 @@
 #undef DEFINE_AVERAGE
 #undef DEFINE_COUNTER
 
-#define APPEND(...) o += snprintf(b + o, n - o, __VA_ARGS__)
+#define APPEND(...) o += snprintf(b + o, o > n ? 0 : n - o, __VA_ARGS__)
 
 void PrintStats(void) {
 #ifndef NDEBUG
-  char b[2048];
+  char b[4096];
   int n = sizeof(b);
   int o = 0;
   b[0] = 0;

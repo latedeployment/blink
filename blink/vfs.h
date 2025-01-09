@@ -15,6 +15,7 @@
 
 #include "blink/dll.h"
 #include "blink/macros.h"
+#include "blink/overlays.h"
 #include "blink/preadv.h"
 #include "blink/thread.h"
 #include "blink/tsan.h"
@@ -45,6 +46,7 @@ struct VfsOps {
               struct VfsMount **);
   int (*Freeinfo)(void *);
   int (*Freedevice)(void *);
+  int (*Readmountentry)(struct VfsDevice *, char **, char **, char **);
   int (*Finddir)(struct VfsInfo *, const char *, struct VfsInfo **);
   int (*Traverse)(struct VfsInfo **, const char **, struct VfsInfo *);
   ssize_t (*Readlink)(struct VfsInfo *, char **);
@@ -131,14 +133,19 @@ struct VfsOps {
   pid_t (*Tcgetsid)(struct VfsInfo *);
   pid_t (*Tcgetpgrp)(struct VfsInfo *);
   int (*Tcsetpgrp)(struct VfsInfo *, pid_t);
+#ifdef HAVE_SOCKATMARK
   int (*Sockatmark)(struct VfsInfo *);
+#endif
   int (*Fexecve)(struct VfsInfo *, char *const *, char *const *);
 };
 
+#define VFS_SYSTEM_NAME_MAX 8
+
 struct VfsSystem {
-  const char *name;
   struct Dll elem;
   struct VfsOps ops;
+  char name[VFS_SYSTEM_NAME_MAX];
+  bool nodev;
 };
 
 struct VfsMount {
@@ -170,6 +177,11 @@ struct VfsInfo {
   u32 mode;
   _Atomic(u32) refcount;
 };
+
+extern struct Vfs g_vfs;
+extern struct VfsInfo *g_cwdinfo;
+extern struct VfsInfo *g_rootinfo;
+extern struct VfsInfo *g_actualrootinfo;
 
 #define VFS_SYSTEM_CONTAINER(e) DLL_CONTAINER(struct VfsSystem, elem, (e))
 #define VFS_MOUNT_CONTAINER(e)  DLL_CONTAINER(struct VfsMount, elem, (e))

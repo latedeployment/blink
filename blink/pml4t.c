@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -16,12 +16,13 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
+#include "blink/pml4t.h"
+
 #include <stdlib.h>
 
 #include "blink/bus.h"
 #include "blink/endian.h"
 #include "blink/machine.h"
-#include "blink/pml4t.h"
 #include "blink/x86.h"
 
 static void AppendContiguousMemoryRange(struct ContiguousMemoryRanges *ranges,
@@ -57,7 +58,7 @@ int FindContiguousMemoryRanges(struct Machine *m,
                                struct ContiguousMemoryRanges *ranges) {
   u64 cr3;
   ranges->i = 0;
-  if (m->mode == XED_MODE_LONG) {
+  if (m->mode.omode == XED_MODE_LONG) {
     cr3 = m->system->cr3;
     FindContiguousMemoryRangesImpl(m, ranges, 0, 39, cr3, 256, 512);
     FindContiguousMemoryRangesImpl(m, ranges, 0, 39, cr3, 0, 256);

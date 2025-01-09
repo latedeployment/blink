@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2023 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -85,6 +85,11 @@ int GetFlagClobbers(u64 rde) {
       return 0;
     case 0xE8:   // call
     case 0xC3:   // ret
+      if (Rep(rde)) {
+        return 0;
+      } else {
+        return -1;
+      }
     case 0x105:  // syscall
       return -1;
     case 0x000:  // add byte
@@ -220,9 +225,10 @@ int GetFlagClobbers(u64 rde) {
         case 0:  // inc
         case 1:  // dec
           return ZF | SF | OF | AF | PF;
-        case 2:  // call Ev
+        case 2:  // call *Ev
+        case 3:  // callf *Ev
           return -1;
-        default:  // call, callf, jmp, jmpf, push
+        default:  // call, jmp, jmpf, push
           return 0;
       }
     case 0x1A3:  // bit bt
@@ -455,8 +461,10 @@ int ClassifyOp(u64 rde) {
       return kOpBranching;
     case 0x0FF:  // Op0ff
       switch (ModrmReg(rde)) {
-        case 2:  // call Ev
-        case 4:  // jmp Ev
+        case 2:  // call *Ev
+        case 3:  // lcall *Ev
+        case 4:  // jmp *Ev
+        case 5:  // ljmp *Ev
           return kOpBranching;
         default:
           return kOpNormal;

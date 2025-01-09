@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -16,6 +16,8 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
+#include "blink/signal.h"
+
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,7 +31,6 @@
 #include "blink/linux.h"
 #include "blink/log.h"
 #include "blink/macros.h"
-#include "blink/signal.h"
 #include "blink/syscall.h"
 #include "blink/thread.h"
 #include "blink/util.h"
@@ -264,7 +265,8 @@ int ConsumeSignal(struct Machine *m, int *delivered, bool *restart) {
 
 void EnqueueSignal(struct Machine *m, int sig) {
   if (m && (1 <= sig && sig <= 64)) {
-    if ((m->signals |= 1ul << (sig - 1)) & ~m->sigmask) {
+    m->signals |= 1ul << (sig - 1);
+    if ((m->signals & ~m->sigmask)) {
       atomic_store_explicit(&m->attention, true, memory_order_release);
     }
   }

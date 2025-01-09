@@ -1,7 +1,5 @@
 ![Screenshot of Blink running GCC 9.4.0](blink/blink-gcc.png)
 
-[![Test Status](https://github.com/jart/blink/actions/workflows/build.yml/badge.svg)](https://github.com/jart/blink/actions/workflows/build.yml)
-[![Cygwin Test Status](https://github.com/jart/blink/actions/workflows/cygwin.yml/badge.svg)](https://github.com/jart/blink/actions/workflows/cygwin.yml)
 # Blinkenlights
 
 This project contains two programs:
@@ -10,7 +8,7 @@ This project contains two programs:
 different operating systems and hardware architectures. It's designed to
 do the same thing as the `qemu-x86_64` command, except that
 
-1. Blink is 217kb in size (115kb with optional features disabled),
+1. Blink is 221kb in size (115kb with optional features disabled),
    whereas qemu-x86_64 is a 4mb binary.
 
 2. Blink will run your Linux binaries on any POSIX system, whereas
@@ -136,6 +134,16 @@ following configuration flags:
 ./configure --posix  # only use c11 with posix xopen standard
 ```
 
+If you want to run a full `chroot`'d Linux distro and require correct
+handling of absolute symlinks, displaying of certain values in `/proc`,
+and so on, and you don't mind paying a small price in terms of size
+and performance, you can enable the emulated VFS feature by using
+the following configuration:
+
+```sh
+./configure --enable-vfs
+```
+
 ### Testing
 
 Blink is tested primarily using precompiled binaries downloaded
@@ -236,7 +244,8 @@ The following `FLAG` arguments are provided:
 
 - `-C path` will cause blink to launch the program in a chroot'd
   environment. This flag is both equivalent to and overrides the
-  `BLINK_OVERLAYS` environment variable.
+  `BLINK_OVERLAYS` environment variable. Note: This flag works
+  especially well if you use `./configure --enable-vfs`.
 
 ### `blinkenlights` Flags
 
@@ -728,68 +737,6 @@ JIT path formation be visualized. Blink currently only enables the JIT
 for programs running in long mode (64-bit) but we may support JITing
 16-bit programs in the future.
 
-#### Lockless Hash Table for Generated Functions
-
-Blink stores generated functions by virtual address in a multithreaded
-lockless hash table. The hottest operation in the codebase is reading
-from this hash table, using a function called `GetJitHook`. Since it'd
-slow Blink down by more than 33% if a mutex were used here, Blink will
-synchronize reads optimistically using only carefully ordered load
-instructions, three of which have acquire semantics. This hash table
-starts off at a reasonable size and grows gradually with the memory
-requirements. This design is the primary reason Blink usually uses 40%
-less peak resident memory than Qemu.
-
-#### Acyclic Generated Code
-
-While JIT paths always end at branching instructions, Blink will still
-weave paths together. If a function is generated and the destination
-address for its final branch instruction points to a location where
-another JIT path has already been installed, then Blink will generate
-code that lets the generated function tail call the second one, by
-jumping into its function body past the prologue. It enables Blink to
-avoid dropping back into the main interpreter loop as much as possible.
-
-Blink keeps track of the connections between JIT functions, in order to
-ensure that JIT'd code remains acyclic. If Blink detects that adding a
-new connection would introduce a cycle, it will generate code that drops
-back into the main intpreter loop instead. This is important because
-Blink only checks for asynchronous signals and other status changes from
-the main interpreter loop. By checking for cycles during path generation
-Blink is able to avoid elevating that costly status checking code into
-JIT generated code, so that the only branches JIT needs are the ones
-that were specified by the guest executable.
-
-#### Reliable JIT Memory Mapping
-
-Blink uses a small memory model that favors near branch instructions.
-Costly operations such as indirecting function calls through a generated
-Procedure Linkage Table (PLT) are avoided. In order to do that, Blink
-needs to ensure JIT memory is mapped at a virtual address that's nearby
-its executable image; otherwise JIT code wouldn't be able to call into
-normal code. However it's not possible to mmap() memory nearby the
-executable in a portable way. Dynamic linkers oftentimes surround a
-loaded executable with dynamic library images, and there's no portable
-API for probing this region that won't risk destroying system mappings.
-
-The trick Blink uses to solve this problem is creating a gigantic global
-static array that's loaded as part of the `.bss` section. This memory is
-then protected or remapped appropriately to turn it into memory that's
-suitable for JIT.
-
-#### Avoiding JIT OOM
-
-Since Blink doesn't generate a PLT or use indirect branches, branching
-is limited to the maximum displacement of the host instruction set. On
-Aaarch64 that means Blink has about ~22mb of JIT memory per process.
-Since large programs will oftentimes need more than that, Blink will
-begin retiring executable pages once memory reaches a certain threshold
-(>90% of blocks used). When a block is retired, all hooks associated
-with all pages it touches are removed. However we still can't guarantee
-that no thread is still currently executing on them. Blink solves that
-using a freelist queue, where retired blocks are placed at the back so
-it takes as long as possible before they're reused.
-
 ### Virtualization
 
 Blink virtualizes memory using the same PML4T approach as the hardware
@@ -819,10 +766,63 @@ flag may be passed to disable the linear translation optimization, and
 instead use only the memory safe full virtualization approach of the
 PML4T and TLB.
 
+#### Lockless Hashing
+
+Blink stores generated functions by virtual address in a multithreaded
+lockless hash table. The hottest operation in the codebase is reading
+from this hash table, using a function called `GetJitHook`. Since it'd
+slow Blink down by more than 33% if a mutex were used here, Blink will
+synchronize reads optimistically using only carefully ordered load
+instructions, three of which have acquire semantics. This hash table
+starts off at a reasonable size and grows gradually with the memory
+requirements. This design is the primary reason Blink usually uses 40%
+less peak resident memory than Qemu.
+
+#### Acyclic Codegen
+
+Even though JIT paths will always end at branching instructions, Blink
+will generate code so that paths tail call into each other, in order to
+avoid dropping back into the main interpreter loop. The average length
+of a JIT path is about ~5 opcodes. Connecting paths causes the average
+path length to be ~13 opcodes.
+
+Since Blink only checks for asynchronous signal delivery and shutdown
+events from the main interpreter loop, Blink maintains a bidirectional
+map of edges between generated functions, so that path connections which
+would result in cycles are never introduced.
+
+An exception is made for tight conditional branches, i.e. jumps whose
+taken path jump backwards to the start of the JIT path. Such branches
+are allowed to be self-referencing so that whole loops of non-system
+operations may be run in purely native code.
+
+#### Reliable Memory
+
+Blink has a 22mb global static variable that's set aside for JIT code.
+This limit was chosen because that's roughly the maximum displacement
+permitted on Arm64 architecture. Having that memory near the program
+image helps make Blink simpler, since generated functions call normal
+functions, without needing relocations or procedure linkage tables.
+
+When Blink runs out of JIT memory, it simply clears all JIT hooks and
+lets the whole code generation process start again. Blink is very fast
+at generating code, and it wouldn't make sense during an OOM panic to
+arbitrarily choose a subset of pages to reset, since resetting pages
+requires tracing their dependencies and resetting those too. Starting
+over is much better. It's so much better in fact, that even if Blink
+only reserved less than a megabyte of memory for JIT, then the slowdown
+that'd be incurred running 40mb binaries like GCC CC1 would only be 3x.
+
+Blink triggers the OOM panic when only 10% of its JIT memory remains.
+That's because in multi-threaded programs, there's no way to guarantee
+nothing is still executing on the retired code blocks. Blink solves this
+by letting retired blocks cool off at the back of a freelist queue, so
+the acyclicity invariant has abundant time to ensure threads drop out.
+
 ### Self-Modifying Code
 
 Many CPU architectures require esoteric rituals for flushing CPU caches
-when code modifies itself. That's not the case with x86 archihtecture,
+when code modifies itself. That's not the case with x86 architecture,
 which takes care of this chore automatically. Blink is able to offer the
 same promises here as Intel and AMD, by abstracting fast and automatic
 invalidation of caches for programs using self-modifying code (SMC).
@@ -962,6 +962,34 @@ Blink supports several different executable formats. You can run:
   programs must be run using the `blinkenlights` command with the `-r`
   flag.
 
+## Filesystems
+
+When Blink is built with the VFS feature enabled (`--enable-vfs`),
+it comes with three default filesystems:
+- `hostfs`: A filesystem that mirrors a certain directory on the
+host's filesystem. Files on `hostfs` mounts have everything
+read from and written directly to the corresponding host directory,
+with the exception of `st_dev` and `st_ino` fields. `st_dev` is
+managed by Blink's VFS subsystem, while `st_ino` is calculated using
+a hash function based on the host's `st_dev` and `st_ino` value.
+- `proc`: A filesystem that emulates Linux's `/proc` using information
+available to Blink.
+- `devfs`: A filesystem that emulates Linux's `/dev`. Currently, this
+is only a wrapper for `hostfs`.
+
+When Blink is launched, these default mount points are added:
+- `/` of type `hostfs` pointing to the corresponding host directory.
+This is determined by querying `$BLINK_PREFIX` and the `-C` parameter
+in order and falls back to `/` if neither are available.
+- `/proc` of type `proc`.
+- `/dev` of type `devfs`.
+- `/SytemRoot` of type `hostfs` pointing to the host's root `/`.
+
+It is possbile for programs to add additional mount points by using
+the `mount` syscall (for `hostfs` mounts, pass the path to the
+directory on the _host_ as the `source` argument), but see the quirks
+below.
+
 ## Quirks
 
 Here's the current list of Blink's known quirks and tradeoffs.
@@ -976,6 +1004,9 @@ considers `RET` and `CALL` terminal ops that break the chain. As such
 carry flag as a return value to indicate error. This should work fine
 when `STC` is used to set the carry flag, but if the code computes it
 cleverly using instructions like `SUB`, then EFLAGS might not change.
+
+As a special case, if a `RET` instruction sports a `REP` prefix, then
+Blink can return flags across the `RET`.
 
 ### Faults
 
@@ -1030,3 +1061,39 @@ the C library is implemented correctly. Please note that when Blink is
 running in full virtualization mode (i.e. `blink -m`) this concern no
 longer applies. That's because Blink will allocate a full system page
 for every 4096 byte page that's mapped from a file.
+
+### Process Management
+
+For builds with the VFS feature enabled (--enable-vfs), while a `procfs`
+mount is available at `/proc`, it is limited to information available
+in a single process. Only `/proc/self` and the corresponding PID folder
+is available. This means programs can get the expected values at
+`/proc/self/exe` and similar files, but process management tools like
+`ps` will not work.
+
+On Linux, some `procfs` symlinks possess a hardlink-like ability of
+being dereferenceable even after the target has been `unlink`ed.
+Blink's implementation currently does not support this use case.
+
+### Mounts
+
+For builds with the VFS feature enabled (`--enable-vfs`), Blink does not
+share mount information with other emulated processes. As a result,
+commands like this may seem to work (by return a 0 status code):
+
+```sh
+mount -t hostfs /some/path/on/host folder
+```
+
+But subsequent calls to `ls folder` on the same shell still does not
+display the expected contents. This is because the `mount` command
+could only modify the mount table kept by itself (and propagated to
+children through `fork`), but not the one used by its parent shell.
+In other words, Blink behaves as if `CLONE_NEWNS` is added to every
+`clone` call, separating the mount namespace of the child from its
+parent.
+
+Some might view this behavior as a feature, but it diverges from
+classic system behavior; a mechanism for handling shared process
+state is being considered in
+[#92](https://github.com/jart/blink/issues/92).

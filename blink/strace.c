@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2023 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -16,6 +16,8 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
+#include "blink/strace.h"
+
 #include <arpa/inet.h>
 #include <errno.h>
 #include <inttypes.h>
@@ -34,13 +36,12 @@
 #include "blink/linux.h"
 #include "blink/machine.h"
 #include "blink/macros.h"
-#include "blink/strace.h"
 #include "blink/thread.h"
 #include "blink/util.h"
 
-#define APPEND(...) bi += snprintf(bp + bi, bn - bi, __VA_ARGS__)
+#define APPEND(...) bi += snprintf(bp + bi, bi > bn ? 0 : bn - bi, __VA_ARGS__)
 
-struct thatispacked MagicNumber {
+struct MagicNumber {
   int x;
   const char *s;
 };
@@ -51,13 +52,13 @@ static const char *const kOpenAccmode[] = {
     "O_RDWR",    //
 };
 
-static const struct DescribeFlags kAccessModes[] = {
+static const struct DescribeFlagz kAccessModes[] = {
     {R_OK_LINUX, "R_OK"},  //
     {W_OK_LINUX, "W_OK"},  //
     {X_OK_LINUX, "X_OK"},  //
 };
 
-static const struct DescribeFlags kOpenFlags[] = {
+static const struct DescribeFlagz kOpenFlags[] = {
     {O_APPEND_LINUX, "APPEND"},        //
     {O_CREAT_LINUX, "CREAT"},          //
     {O_EXCL_LINUX, "EXCL"},            //
@@ -77,7 +78,7 @@ static const struct DescribeFlags kOpenFlags[] = {
     {O_DSYNC_LINUX, "DSYNC"},          //
 };
 
-static const struct DescribeFlags kProtFlags[] = {
+static const struct DescribeFlagz kProtFlags[] = {
     {PROT_READ_LINUX, "READ"},            //
     {PROT_WRITE_LINUX, "WRITE"},          //
     {PROT_EXEC_LINUX, "EXEC"},            //
@@ -86,7 +87,7 @@ static const struct DescribeFlags kProtFlags[] = {
     {PROT_GROWSUP_LINUX, "GROWSUP"},      //
 };
 
-static const struct DescribeFlags kMapFlags[] = {
+static const struct DescribeFlagz kMapFlags[] = {
     {MAP_SHARED_LINUX, "SHARED"},                    //
     {MAP_PRIVATE_LINUX, "PRIVATE"},                  //
     {MAP_FIXED_LINUX, "FIXED"},                      //
@@ -102,7 +103,7 @@ static const struct DescribeFlags kMapFlags[] = {
     {MAP_UNINITIALIZED_LINUX, "UNINITIALIZED"},      //
 };
 
-static const struct DescribeFlags kSaFlags[] = {
+static const struct DescribeFlagz kSaFlags[] = {
     {SA_NOCLDSTOP_LINUX, "NOCLDSTOP"},            //
     {SA_NOCLDWAIT_LINUX, "NOCLDWAIT"},            //
     {SA_SIGINFO_LINUX, "SIGINFO"},                //
@@ -115,7 +116,7 @@ static const struct DescribeFlags kSaFlags[] = {
     {SA_RESETHAND_LINUX, "RESETHAND"},            //
 };
 
-static const struct DescribeFlags kAtFlags[] = {
+static const struct DescribeFlagz kAtFlags[] = {
     {AT_SYMLINK_NOFOLLOW_LINUX, "SYMLINK_NOFOLLOW"},  //
     {AT_REMOVEDIR_LINUX, "REMOVEDIR"},                //
     {AT_EACCESS_LINUX, "EACCESS"},                    //
@@ -124,7 +125,7 @@ static const struct DescribeFlags kAtFlags[] = {
 };
 
 #ifndef DISABLE_THREADS
-static const struct DescribeFlags kCloneFlags[] = {
+static const struct DescribeFlagz kCloneFlags[] = {
     {CLONE_VM_LINUX, "VM"},                          //
     {CLONE_THREAD_LINUX, "THREAD"},                  //
     {CLONE_FS_LINUX, "FS"},                          //
@@ -148,7 +149,7 @@ static const struct DescribeFlags kCloneFlags[] = {
 #endif
 
 #ifndef DISABLE_NONPOSIX
-static const struct DescribeFlags kRenameFlags[] = {
+static const struct DescribeFlagz kRenameFlags[] = {
     {RENAME_NOREPLACE_LINUX, "NOREPLACE"},  //
     {RENAME_EXCHANGE_LINUX, "EXCHANGE"},    //
     {RENAME_WHITEOUT_LINUX, "WHITEOUT"},    //
@@ -156,7 +157,7 @@ static const struct DescribeFlags kRenameFlags[] = {
 #endif
 
 #ifdef HAVE_FORK
-static const struct DescribeFlags kWaitFlags[] = {
+static const struct DescribeFlagz kWaitFlags[] = {
     {WNOHANG_LINUX, "WNOHANG"},          //
     {WUNTRACED_LINUX, "WUNTRACED"},      //
     {WEXITED_LINUX, "WEXITED"},          //
@@ -169,11 +170,17 @@ static const struct DescribeFlags kWaitFlags[] = {
 #endif
 
 #ifndef DISABLE_SOCKETS
-static const struct DescribeFlags kSockFlags[] = {
+static const struct DescribeFlagz kSockFlags[] = {
     {SOCK_CLOEXEC_LINUX, "CLOEXEC"},    //
     {SOCK_NONBLOCK_LINUX, "NONBLOCK"},  //
 };
 #endif
+
+const struct MagicNumber kWhence[] = {
+    {SEEK_SET_LINUX, "SEEK_SET"},  //
+    {SEEK_CUR_LINUX, "SEEK_CUR"},  //
+    {SEEK_END_LINUX, "SEEK_END"},  //
+};
 
 const struct MagicNumber kSigHow[] = {
     {SIG_BLOCK_LINUX, "SIG_BLOCK"},      //
@@ -228,6 +235,29 @@ const struct MagicNumber kResource[] = {
     {RLIMIT_NICE_LINUX, "RLIMIT_NICE"},              //
     {RLIMIT_RTPRIO_LINUX, "RLIMIT_RTPRIO"},          //
     {RLIMIT_RTTIME_LINUX, "RLIMIT_RTTIME"},          //
+};
+
+const struct MagicNumber kFcntl[] = {
+    {F_DUPFD_LINUX, "F_DUPFD"},                  //
+    {F_DUPFD_CLOEXEC_LINUX, "F_DUPFD_CLOEXEC"},  //
+    {F_GETFL_LINUX, "F_GETFL"},                  //
+    {F_SETFL_LINUX, "F_SETFL"},                  //
+    {F_GETLK_LINUX, "F_GETLK"},                  //
+    {F_SETLK_LINUX, "F_SETLK"},                  //
+    {F_SETLKW_LINUX, "F_SETLKW"},                //
+    {F_SETOWN_LINUX, "F_SETOWN"},                //
+    {F_GETOWN_LINUX, "F_GETOWN"},                //
+    {F_SETSIG_LINUX, "F_SETSIG"},                //
+    {F_GETSIG_LINUX, "F_GETSIG"},                //
+    {F_SETOWN_EX_LINUX, "F_SETOWN_EX"},          //
+    {F_GETOWN_EX_LINUX, "F_GETOWN_EX"},          //
+    {F_GETOWNER_UIDS_LINUX, "F_GETOWNER_UIDS"},  //
+};
+
+const struct MagicNumber kFlockType[] = {
+    {F_RDLCK_LINUX, "F_RDLCK"},  //
+    {F_WRLCK_LINUX, "F_WRLCK"},  //
+    {F_UNLCK_LINUX, "F_UNLCK"},  //
 };
 
 static const char *GetMagicNumber(const struct MagicNumber *p, int n, int x) {
@@ -426,13 +456,13 @@ void Strace(struct Machine *m, const char *func, bool isentry, const char *fmt,
       if (!arg) {
         APPEND("F_OK");
       } else {
-        DescribeFlags(tmp, sizeof(tmp), kAccessModes, ARRAYLEN(kAccessModes),
+        DescribeFlagz(tmp, sizeof(tmp), kAccessModes, ARRAYLEN(kAccessModes),
                       "", arg);
         APPEND("%s", tmp);
       }
 #ifdef HAVE_FORK
     } else if (c == I32_WAITFLAGS[0]) {
-      DescribeFlags(tmp, sizeof(tmp), kWaitFlags, ARRAYLEN(kWaitFlags), "",
+      DescribeFlagz(tmp, sizeof(tmp), kWaitFlags, ARRAYLEN(kWaitFlags), "",
                     arg);
       APPEND("%s", tmp);
     } else if (c == O_WSTATUS[0]) {
@@ -454,14 +484,14 @@ void Strace(struct Machine *m, const char *func, bool isentry, const char *fmt,
 #endif
     } else if (c == I32_PROT[0]) {
       if (arg) {
-        DescribeFlags(tmp, sizeof(tmp), kProtFlags, ARRAYLEN(kProtFlags),
+        DescribeFlagz(tmp, sizeof(tmp), kProtFlags, ARRAYLEN(kProtFlags),
                       "PROT_", arg);
         APPEND("%s", tmp);
       } else {
         APPEND("PROT_NONE");
       }
     } else if (c == I32_MAPFLAGS[0]) {
-      DescribeFlags(tmp, sizeof(tmp), kMapFlags, ARRAYLEN(kMapFlags), "MAP_",
+      DescribeFlagz(tmp, sizeof(tmp), kMapFlags, ARRAYLEN(kMapFlags), "MAP_",
                     arg);
       APPEND("%s", tmp);
     } else if (c == I32_OFLAGS[0]) {
@@ -471,7 +501,7 @@ void Strace(struct Machine *m, const char *func, bool isentry, const char *fmt,
         arg2 &= ~O_ACCMODE_LINUX;
       }
       if (arg2) {
-        DescribeFlags(tmp, sizeof(tmp), kOpenFlags, ARRAYLEN(kOpenFlags), "O_",
+        DescribeFlagz(tmp, sizeof(tmp), kOpenFlags, ARRAYLEN(kOpenFlags), "O_",
                       arg2);
         APPEND("|%s", tmp);
       }
@@ -479,11 +509,11 @@ void Strace(struct Machine *m, const char *func, bool isentry, const char *fmt,
         ++i;  // ignore mode
       }
     } else if (c == I32_ATFLAGS[0]) {
-      DescribeFlags(tmp, sizeof(tmp), kAtFlags, ARRAYLEN(kAtFlags), "AT_", arg);
+      DescribeFlagz(tmp, sizeof(tmp), kAtFlags, ARRAYLEN(kAtFlags), "AT_", arg);
       APPEND("%s", tmp);
 #ifndef DISABLE_THREADS
     } else if (c == I32_CLONEFLAGS[0]) {
-      DescribeFlags(tmp, sizeof(tmp), kCloneFlags, ARRAYLEN(kCloneFlags),
+      DescribeFlagz(tmp, sizeof(tmp), kCloneFlags, ARRAYLEN(kCloneFlags),
                     "CLONE_", arg);
       APPEND("%s", tmp);
 #endif
@@ -597,7 +627,7 @@ void Strace(struct Machine *m, const char *func, bool isentry, const char *fmt,
             break;
         }
         if (Read64(sa->flags)) {
-          DescribeFlags(tmp, sizeof(tmp), kSaFlags, ARRAYLEN(kSaFlags), "SA_",
+          DescribeFlagz(tmp, sizeof(tmp), kSaFlags, ARRAYLEN(kSaFlags), "SA_",
                         Read64(sa->flags));
           APPEND(", .sa_flags=%s", tmp);
         }
@@ -640,7 +670,7 @@ void Strace(struct Machine *m, const char *func, bool isentry, const char *fmt,
       APPEND("%s", GetMagicNumber(kClock, ARRAYLEN(kClock), arg));
 #ifndef DISABLE_SOCKETS
     } else if (c == I32_SOCKFLAGS[0]) {
-      DescribeFlags(tmp, sizeof(tmp), kSockFlags, ARRAYLEN(kSockFlags), "SOCK_",
+      DescribeFlagz(tmp, sizeof(tmp), kSockFlags, ARRAYLEN(kSockFlags), "SOCK_",
                     arg);
       APPEND("%s", tmp);
     } else if (IS_ADDR(c)) {
@@ -674,10 +704,59 @@ void Strace(struct Machine *m, const char *func, bool isentry, const char *fmt,
 #endif
 #ifndef DISABLE_NONPOSIX
     } else if (c == I32_RENFLAGS[0]) {
-      DescribeFlags(tmp, sizeof(tmp), kRenameFlags, ARRAYLEN(kRenameFlags),
+      DescribeFlagz(tmp, sizeof(tmp), kRenameFlags, ARRAYLEN(kRenameFlags),
                     "RENAME_", arg);
       APPEND("%s", tmp);
 #endif
+    } else if (c == WAT_FCNTL[0]) {
+      APPEND("%s", GetMagicNumber(kFcntl, ARRAYLEN(kFcntl), arg));
+      if (arg == F_SETLK_LINUX ||   //
+          arg == F_SETLKW_LINUX ||  //
+          arg == F_GETLK_LINUX) {
+        i64 addr = va_arg(va, i64);
+        const struct flock_linux *l;
+        if ((l = (const struct flock_linux *)SchlepR(
+                 m, addr, sizeof(struct flock_linux)))) {
+          APPEND(", ");
+          if (arg == F_GETLK_LINUX) {
+            APPEND("[");
+          }
+          APPEND("{%s", GetMagicNumber(kFlockType, ARRAYLEN(kFlockType),
+                                       Read16(l->type)));
+          APPEND(", %s",
+                 GetMagicNumber(kWhence, ARRAYLEN(kWhence), Read16(l->whence)));
+          if (Read64(l->start)) {
+            APPEND(", .l_start=%#" PRIx64, Read64(l->start));
+          }
+          if (Read64(l->len)) {
+            APPEND(", .l_len=%" PRIu64, Read64(l->len));
+          }
+          if (Read64(l->pid) && arg == F_GETLK_LINUX) {
+            APPEND(", .l_pid=%" PRIu32, Read32(l->pid));
+          }
+          APPEND("}");
+          if (arg == F_GETLK_LINUX) {
+            APPEND("]");
+          }
+        } else {
+          APPEND(", %#" PRIx64, addr);
+        }
+      } else if (arg == F_SETFD_LINUX) {
+        i32 flags = va_arg(va, i64);
+        if (flags == FD_CLOEXEC_LINUX) {
+          APPEND(", FD_CLOEXEC");
+        } else {
+          APPEND(", %#" PRIx32, flags);
+        }
+      } else if (arg == F_SETFL_LINUX) {
+        i32 flags = va_arg(va, i64);
+        DescribeFlagz(tmp, sizeof(tmp), kOpenFlags, ARRAYLEN(kOpenFlags), "O_",
+                      flags);
+        APPEND("%s", tmp);
+      } else if (arg == F_SETOWN_LINUX) {
+        i32 fd = va_arg(va, i64);
+        APPEND(", %#" PRIx32, fd);
+      }
     } else {
       LOGF("missing strace signature specifier %#o", c);
       goto JustPrintHex;

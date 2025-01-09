@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -149,8 +149,8 @@ static char *DisName(struct Dis *d, char *bp, const char *name,
       } else {
         *p++ = 's';
       }
-    } else if (wantsuffix || (ambiguous && !startswith(name, "f") &&
-                              !startswith(name, "set"))) {
+    } else if (wantsuffix || (ambiguous && !StartsWith(name, "f") &&
+                              !StartsWith(name, "set"))) {
       if (Osz(rde)) {
         if (ambiguous || Mode(rde) != XED_MODE_REAL) {
           *p++ = 'w';

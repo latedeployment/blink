@@ -1,5 +1,5 @@
 /*-*- mode:c;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
-│vi: set net ft=c ts=2 sts=2 sw=2 fenc=utf-8                                :vi│
+│ vi: set et ft=c ts=2 sts=2 sw=2 fenc=utf-8                               :vi │
 ╞══════════════════════════════════════════════════════════════════════════════╡
 │ Copyright 2022 Justine Alexandra Roberts Tunney                              │
 │                                                                              │
@@ -16,6 +16,8 @@
 │ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
+#include "blink/log.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -28,7 +30,6 @@
 
 #include "blink/assert.h"
 #include "blink/fspath.h"
-#include "blink/log.h"
 #include "blink/machine.h"
 #include "blink/macros.h"
 #include "blink/thread.h"
@@ -41,7 +42,8 @@
 
 #define DEFAULT_LOG_PATH "blink.log"
 
-#define APPEND(F, ...) n += F(b + n, PIPE_BUF - n, __VA_ARGS__)
+#define APPEND(F, ...) \
+  n += F(b + n, n > PIPE_BUF ? 0 : PIPE_BUF - n, __VA_ARGS__)
 
 static struct Log {
   pthread_once_t_ once;
@@ -125,8 +127,8 @@ static void OpenLog(void) {
 
 static void Log(const char *file, int line, const char *fmt, va_list va,
                 int level) {
+  char b[4096];
   int err, n = 0;
-  char b[PIPE_BUF];
   err = errno;
   unassert(!pthread_once_(&g_log.once, OpenLog));
   APPEND(snprintf, "%c%s:%s:%d:%d ", "EI"[level], GetTimestamp(), file, line,
@@ -135,10 +137,10 @@ static void Log(const char *file, int line, const char *fmt, va_list va,
   APPEND(snprintf, "\n");
   if (n > PIPE_BUF - 1) {
     n = PIPE_BUF - 1;
-    b[--n] = '\n';
-    b[--n] = '.';
-    b[--n] = '.';
-    b[--n] = '.';
+    b[n - 1] = '\n';
+    b[n - 2] = '.';
+    b[n - 3] = '.';
+    b[n - 4] = '.';
   }
   if (g_log.fd != -1) {
     WriteError(g_log.fd, b, n);
