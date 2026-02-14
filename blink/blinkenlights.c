@@ -159,31 +159,6 @@ FEATURES\n\
   Type ? for keyboard shortcuts and CLI flags inside emulator.\n\
 \n"
 
-#define HELP \
-  "\033[1mBlinkenlights " BLINK_VERSION "\033[22m\
-                https://github.com/jart/blink/\n\
-\n\
-KEYBOARD SHORTCUTS                CLI FLAGS\n\
-\n\
-ctrl-c  interrupt                 -t       no tui\n\
-s       step                      -r       real mode\n\
-n       next                      -Z       statistics\n\
-c       continue                  -b ADDR  push breakpoint\n\
-C       continue harder           -w ADDR  push watchpoint\n\
-q       quit                      -L PATH  log file location\n\
-f       finish                    -R       deliver crash sigs\n\
-R       restart                   -H       disable highlighting\n\
-?       help                      -v       blinkenlights version\n\
-x       sse radix                 -j       enables jit\n\
-t       sse type                  -m       disables memory safety\n\
-T       sse size                  -N       natural scroll wheel\n\
-B       pop breakpoint            -s       system call logging\n\
-p       profiling mode            -C PATH  chroot directory\n\
-ctrl-t  turbo                     -B PATH  alternate BIOS image\n\
-alt-t   slowmo                    -z       zoom\n\
-2       toggle column 2           -h       help\n\
-3       toggle column 3"
-
 #define FPS        60     // frames per second written to tty
 #define TURBO      true   // to keep executing between frames
 #define HISTORY    65536  // number of rewind renders to ring
@@ -321,6 +296,32 @@ struct ProfSyms {
   unsigned long toto;
   struct ProfSym *p;
 };
+
+static const char kHelp[] = "\
+\033[1mBlinkenlights " BLINK_VERSION "\033[22m\
+                https://github.com/jart/blink/\n\
+\n\
+KEYBOARD SHORTCUTS                CLI FLAGS\n\
+\n\
+ctrl-c  interrupt                 -t       no tui\n\
+s       step                      -r       real mode\n\
+n       next                      -Z       statistics\n\
+c       continue                  -b ADDR  push breakpoint\n\
+C       continue harder           -w ADDR  push watchpoint\n\
+q       quit                      -L PATH  log file location\n\
+f       finish                    -R       deliver crash sigs\n\
+R       restart                   -H       disable highlighting\n\
+?       help                      -v       blinkenlights version\n\
+x       sse radix                 -j       enables jit\n\
+t       sse type                  -m       disables memory safety\n\
+T       sse size                  -N       natural scroll wheel\n\
+b       push breakpoint           -s       system call logging\n\
+B       pop breakpoint\n\
+p       profiling mode            -C PATH  chroot directory\n\
+ctrl-t  turbo                     -B PATH  alternate BIOS image\n\
+alt-t   slowmo                    -z       zoom\n\
+2       toggle column 2           -h       help\n\
+3       toggle column 3";
 
 static const char kRipName[3][4] = {"IP", "EIP", "RIP"};
 
@@ -817,16 +818,16 @@ static void OnSigSys(int sig) {
   // do nothing
 }
 
-static void OnSigWinch(int sig, siginfo_t *si, void *uc) {
+static void OnSigWinch(int sig) {
   EnqueueSignal(m, SIGWINCH_LINUX);
   action |= WINCHED;
 }
 
-static void OnSigInt(int sig, siginfo_t *si, void *uc) {
+static void OnSigInt(int sig) {
   action |= INT;
 }
 
-static void OnSigAlrm(int sig, siginfo_t *si, void *uc) {
+static void OnSigAlrm(int sig) {
   action |= ALARM;
 }
 
@@ -844,12 +845,12 @@ static void TuiCleanup(void) {
   TtyRestore();
 }
 
-static void OnSigTstp(int sig, siginfo_t *si, void *uc) {
+static void OnSigTstp(int sig) {
   TtyRestore();
   raise(SIGSTOP);
 }
 
-static void OnSigCont(int sig, siginfo_t *si, void *uc) {
+static void OnSigCont(int sig) {
   if (tuimode) {
     TuiRejuvinate();
     Redraw(true);
@@ -884,6 +885,14 @@ static void BreakAtNextInstruction(void) {
   memset(&b, 0, sizeof(b));
   b.addr = GetPc(m) + m->xedd->length;
   b.oneshot = true;
+  PushBreakpoint(&breakpoints, &b);
+}
+
+static void BreakAtCurrentInstruction(void) {
+  struct Breakpoint b;
+  if (IsAtBreakpoint(&breakpoints, m->ip) != -1) return;
+  memset(&b, 0, sizeof(b));
+  b.addr = m->ip;
   PushBreakpoint(&breakpoints, &b);
 }
 
@@ -961,10 +970,10 @@ void TuiSetup(void) {
   memset(&it, 0, sizeof(it));
   setitimer(ITIMER_REAL, &it, 0);
   memset(&sa, 0, sizeof(sa));
-  sa.sa_sigaction = OnSigCont;
-  sa.sa_flags = SA_RESTART | SA_NODEFER | SA_SIGINFO;
+  sa.sa_handler = OnSigCont;
+  sa.sa_flags = SA_RESTART | SA_NODEFER;
   sigaction(SIGCONT, &sa, oldsig + 2);
-  sa.sa_sigaction = OnSigTstp;
+  sa.sa_handler = OnSigTstp;
   sigaction(SIGTSTP, &sa, 0);
   CopyMachineState(&laststate);
   TuiRejuvinate();
@@ -1812,14 +1821,16 @@ static void DrawBreakpoints(struct Panel *p) {
       if (!(name = breakpoints.p[i].symbol)) {
         name = sym != -1 ? dis->syms.p[sym].name : "UNKNOWN";
       }
+      if (addr == m->ip) AppendPanel(p, line - breakpointsstart, "\033[7m");
       s = buf;
       s += sprintf(s, "%0*" PRIx64 " ", GetAddrHexWidth(), addr);
       strcpy(s, name);
       AppendPanel(p, line - breakpointsstart, buf);
       if (sym != -1 && addr != dis->syms.p[sym].addr) {
         snprintf(buf, sizeof(buf), "+%#" PRIx64, addr - dis->syms.p[sym].addr);
-        AppendPanel(p, line, buf);
+        AppendPanel(p, line - breakpointsstart, buf);
       }
+      if (addr == m->ip) AppendPanel(p, line - breakpointsstart, "\033[27m");
     }
     ++line;
   }
@@ -3010,7 +3021,7 @@ static void OnMouse(const char *p) {
 }
 
 static void OnHelp(void) {
-  dialog = HELP;
+  dialog = dialog == kHelp ? NULL : kHelp;
 }
 
 static void HandleKeyboard(const char *k) {
@@ -3033,6 +3044,7 @@ static void HandleKeyboard(const char *k) {
     CASE('d', OnDown());
     CASE('V', ++verbose);
     CASE('p', showprofile = !showprofile);
+    CASE('b', BreakAtCurrentInstruction());
     CASE('B', PopBreakpoint(&breakpoints));
     CASE('M', ToggleMouseTracking());
     CASE('\r', OnEnter());
@@ -3738,14 +3750,14 @@ int main(int argc, char *argv[]) {
   sa.sa_flags = 0;
   sa.sa_handler = OnSigSys;
   unassert(!sigaction(SIGSYS, &sa, 0));
-  sa.sa_flags = SA_SIGINFO;
-  sa.sa_sigaction = OnSigInt;
+  sa.sa_handler = OnSigInt;
   unassert(!sigaction(SIGINT, &sa, 0));
-  sa.sa_sigaction = OnSigWinch;
+  sa.sa_handler = OnSigWinch;
   unassert(!sigaction(SIGWINCH, &sa, 0));
-  sa.sa_sigaction = OnSigAlrm;
+  sa.sa_handler = OnSigAlrm;
   unassert(!sigaction(SIGALRM, &sa, 0));
-#ifndef __SANITIZE_THREAD__
+#if !defined(__SANITIZE_THREAD__) && !defined(__FILC__)
+  sa.sa_flags = SA_SIGINFO;
   sa.sa_sigaction = OnSigSegv;
   unassert(!sigaction(SIGBUS, &sa, 0));
   unassert(!sigaction(SIGSEGV, &sa, 0));
